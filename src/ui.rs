@@ -8,6 +8,7 @@ pub mod library;
 mod loop_builder;
 pub mod markdown;
 pub mod memory;
+pub mod project;
 mod run_screen;
 mod runs;
 mod session_screen;
@@ -395,6 +396,11 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
             let full = f.area();
             let area = Rect::new(full.x, full.y, full.width, full.height.saturating_sub(1));
             factory::draw(f, area, view);
+        }
+        Mode::Project(view) => {
+            let full = f.area();
+            let area = Rect::new(full.x, full.y, full.width, full.height.saturating_sub(1));
+            project::draw(f, area, view);
         }
         Mode::Langfuse(view) => {
             let full = f.area();

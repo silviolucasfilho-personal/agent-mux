@@ -1,6 +1,6 @@
 # Projects: every spec-wave flow, in agent-mux — design
 
-Status: proposal, 2026-11-18 (third draft). Nothing is implemented.
+Status: proposal, 2026-11-18 (third draft). Phase 1 is implemented (§19); nothing else is.
 
 **The requirement.** Any repository configured with spec-wave must open in
 agent-mux as a **Project** and work there: every flow spec-wave has, each
@@ -1043,3 +1043,41 @@ order map and its "what is next and why" in the terminal.
   path starts a process that is not a traced launch.
 - Screens: one test per screen of §12 (rows from a fixture snapshot, each
   verb's availability through the action registry).
+
+## 19. Phase 1 as built
+
+Built on 2026-11-18: `src/project/`, `src/app/project.rs`,
+`src/ui/project.rs`, `agent-mux project doctor|sync|ls|show|next|order`,
+schema v30, `docs/project.md`. Where the code differs from the sections
+above:
+
+- **The store** (§14) has two tables, not five: `project_items` (the plain
+  columns for queries and a `data` column with the whole item) and
+  `project_boards` (the rest of a snapshot, by hub). `project_steps`,
+  `project_dispatches` and the `work_items` columns come with the phases
+  that write them.
+- **The item screen** (§12) is part of `Mode::Project`
+  (`ProjectView.item`), not a mode of its own. Its tabs are Card,
+  Documents, Children, Pull requests and Thread; Runs, Live and Trace come
+  with the phases that start sessions.
+- **The pane** of a list row has fewer tabs than §12's table: Card
+  everywhere, Order on Ready, Features and Order on Milestones.
+- **The stage** (§4.2): there is no `[project] stage` setting. The board
+  is read when gh's token may read it; an issue that is not on the board,
+  or every issue when the board is not read, shows a derived stage marked
+  `~`. No `stage_max` is kept, since nothing is moved yet.
+- **`project::next`** blocks a step whose document is `unknown`
+  (`unknown-document`), where spec-wave only warns. It has no
+  `stale-checkout`: agent-mux reads the default branch on GitHub, not a
+  clone. `needs-confirmation` and `board-unreachable` belong to the phase
+  that runs steps.
+- **The hub of a code repository** (§4.4) is found only beside it, by the
+  hub's repository name. `[project.paths]` is not read yet.
+- **Not built:** the mouse on these screens, the filter bar's milestone,
+  repository and "mine" filters (`/` filters by title and number), roles
+  as navigation presets, the inbox rows, the parity table generated from
+  spec-wave's CLI and the recorded fixtures of two real repositories
+  (§18). The port was checked by hand against a real hub: its 215 issues,
+  its board, its retired column and its documents in review.
+- **A read** of that hub (145 open issues) takes about 20 seconds, which
+  is why the screens open on the cache.

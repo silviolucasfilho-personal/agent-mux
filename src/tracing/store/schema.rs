@@ -1,11 +1,11 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 29;
+pub const SCHEMA_VERSION: i32 = 30;
 
 pub const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
-    V22, V23, V24, V25, V26, V27, V28, V29,
+    V22, V23, V24, V25, V26, V27, V28, V29, V30,
 ];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
@@ -1569,4 +1569,34 @@ BEGIN
   INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
   VALUES ('session', OLD.key, OLD.key, NULL, 'delete');
 END;
+"#;
+
+// v30: Projects (`src/project/`). A cache of what GitHub holds for a
+// repository configured with spec-wave: one row per issue of the hub, and
+// one row per hub for the rest of a snapshot (milestones, the board's
+// stages, what a read left unknown). `project sync` rebuilds both; nothing
+// here is a fact GitHub does not have. The plain columns are for queries;
+// `data` is the whole item.
+const V30: &str = r#"
+CREATE TABLE IF NOT EXISTS project_items (
+  hub        TEXT NOT NULL,
+  number     INTEGER NOT NULL,
+  type       TEXT,
+  title      TEXT NOT NULL,
+  state      TEXT NOT NULL,
+  stage      TEXT,
+  status     TEXT,
+  parent     INTEGER,
+  milestone  TEXT,
+  priority   TEXT,
+  data       TEXT NOT NULL,
+  synced_ns  INTEGER NOT NULL,
+  PRIMARY KEY (hub, number)
+);
+CREATE INDEX IF NOT EXISTS project_items_parent ON project_items (hub, parent);
+CREATE TABLE IF NOT EXISTS project_boards (
+  hub        TEXT PRIMARY KEY,
+  data       TEXT NOT NULL,
+  synced_ns  INTEGER NOT NULL
+);
 "#;

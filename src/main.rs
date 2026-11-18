@@ -102,6 +102,7 @@ async fn main() -> Result<()> {
             Some("config") => return agent_mux::config_cli::run(&args[2..]),
             Some("workflow") => return agent_mux::workflows::cli::run(&args[2..]).await,
             Some("factory") => return agent_mux::factory::cli::run(&args[2..]).await,
+            Some("project") => return agent_mux::project::cli::run(&args[2..]),
             Some("agent") => return agent_mux::agents::cli::run(&args[2..]),
             Some("keys") => return agent_mux::keys_cli::run(&args[2..]),
             Some("md") => return agent_mux::markdown::cli::run(&args[2..]),

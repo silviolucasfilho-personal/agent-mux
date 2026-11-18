@@ -30,6 +30,7 @@ pub mod harness_recap;
 pub mod inbox;
 pub mod loop_builder;
 pub mod new_agent;
+pub mod project;
 pub mod run_report;
 pub mod run_screen;
 pub mod runs_view;
@@ -100,6 +101,8 @@ pub enum Mode {
     Workspaces(Box<workspaces_view::WorkspacesView>),
     /// The Factory screen: one repository's work items and its brain.
     Factory(Box<factory::FactoryView>),
+    /// The Project screens: a spec-wave repository's work items, read from GitHub.
+    Project(Box<project::ProjectView>),
     /// The Library screen: every flow, skill and persona in a left
     /// tree, launched through one harness picker.
     Library(Box<library::LibraryState>),
@@ -259,6 +262,8 @@ pub enum Action {
     WorkspacesKey,
     /// Factory mode: App routes the key to the view it owns.
     FactoryKey,
+    /// Project mode: App routes the key to the view it owns.
+    ProjectKey,
     SwarmKey,
     LangfuseKey,
     /// LoopsView mode: App routes the key to the LoopsViewState it owns.
@@ -889,6 +894,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::Memory(_) => Action::MemoryKey,
         Mode::Workspaces(_) => Action::WorkspacesKey,
         Mode::Factory(_) => Action::FactoryKey,
+        Mode::Project(_) => Action::ProjectKey,
         // the swarm's pane has the keyboard: the session's, as on Agents
         Mode::Swarm(v) if v.pane_focused => match encode_key_with_mode(key, ctx.app_cursor) {
             Some(bytes) => Action::ForwardBytes(bytes),
@@ -2875,6 +2881,11 @@ pub struct App {
     /// The Factory screen as it was when it opened an item's run.
     pub(crate) factory_return: Option<Box<factory::FactoryView>>,
     pub last_factory_needs: Option<Instant>,
+    /// The `gh` the Project screens run; `None` is `gh` on `PATH`.
+    pub project_gh: Option<String>,
+    /// The folder the Project screens open on in place of the selected
+    /// session's.
+    pub project_dir_override: Option<std::path::PathBuf>,
     /// Work items and brain notes waiting on the operator, as last counted.
     pub factory_needs: usize,
     /// Unix domain socket path for inter-agent bus control (`WakeSession`, `SpawnWorker`).
@@ -3070,6 +3081,8 @@ impl App {
             last_factory_poll: None,
             factory_return: None,
             last_factory_needs: None,
+            project_gh: None,
+            project_dir_override: None,
             factory_needs: 0,
             bus_control_sock: None,
             bus_control_guard: None,
@@ -3563,6 +3576,7 @@ impl App {
             view.poll();
         }
         self.factory_tick(now);
+        self.project_tick();
         if let Mode::Langfuse(view) = &mut self.mode {
             view.poll();
         }
@@ -6691,6 +6705,7 @@ impl App {
                 }
             }
             Action::FactoryKey => self.handle_factory_key(key),
+            Action::ProjectKey => self.handle_project_key(key),
             Action::WorkspacesKey => {
                 if let Mode::Workspaces(view) = &mut self.mode {
                     let outcome = view.handle_key(key);
