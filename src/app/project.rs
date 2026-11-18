@@ -2239,10 +2239,12 @@ mod tests {
         // the first Esc clears the filter, the second closes
         assert_eq!(v.handle_key(&key(KeyCode::Esc)), Outcome::None);
         assert!(v.filter.is_empty());
-        assert_eq!(
-            v.handle_key(&key(KeyCode::Char('r')).clone()),
-            Outcome::None
-        );
+        // plain `r` is a verb (run the next step): on a heading it only
+        // says to select an item, and reloads nothing
+        assert!(matches!(
+            v.handle_key(&key(KeyCode::Char('r'))),
+            Outcome::Notice(_)
+        ));
         assert_eq!(
             v.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
             Outcome::Sync
