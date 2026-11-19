@@ -223,6 +223,13 @@ fn a_spec_wave_repository_opens_reads_and_draws() {
     assert!(board.contains("Feature #1  Cadastro de Pedidos"), "{board}");
     assert!(board.contains("next: generate-plan"), "{board}");
 
+    // Specification: the Feature's spec is merged, so the plan is next
+    f.app.handle_project_key(&key(KeyCode::Char(']')));
+    f.app.handle_project_key(&key(KeyCode::Char(']')));
+    assert_eq!(view(&f.app).screen, Screen::Spec);
+    let spec = render(&f.app);
+    assert!(spec.contains("spec merged: the plan is next (1)"), "{spec}");
+
     // Ready: the Stories in execution order
     f.app.handle_project_key(&key(KeyCode::Char(']')));
     f.app.handle_project_key(&key(KeyCode::Char(']')));
@@ -416,7 +423,7 @@ fn what_waits_on_the_operator_is_in_the_inbox_and_opens_its_item() {
     f.app.open_project();
     wait(&mut f.app, "the read", |a| view(a).snap.is_some());
     // the Bugs screen lists the Bug that waits for its triage
-    for _ in 0..4 {
+    for _ in 0..6 {
         f.app.handle_project_key(&key(KeyCode::Char(']')));
     }
     assert_eq!(view(&f.app).screen, Screen::Bugs);
@@ -439,4 +446,66 @@ fn what_waits_on_the_operator_is_in_the_inbox_and_opens_its_item() {
     assert_eq!(view(&f.app).item.as_ref().map(|i| i.number), Some(4));
     let card = render(&f.app);
     assert!(card.contains("next: triage"), "{card}");
+}
+
+#[test]
+fn the_next_step_is_confirmed_then_started_as_its_own_process() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut f = fixture();
+    // a stand-in for the binary: it records how it was started
+    let root = f.ws.parent().unwrap().to_path_buf();
+    let exe = root.join("fake-agent-mux");
+    let started = root.join("started");
+    std::fs::write(
+        &exe,
+        format!("#!/bin/sh\necho \"$*\" >> \"{}\"\n", started.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    f.app.project_exe = Some(exe);
+    f.app.open_project();
+    wait(&mut f.app, "the read", |a| view(a).snap.is_some());
+
+    // Specification, onto the Feature whose spec is merged
+    for _ in 0..3 {
+        f.app.handle_project_key(&key(KeyCode::Char(']')));
+    }
+    assert_eq!(view(&f.app).screen, Screen::Spec);
+    let at = view(&f.app)
+        .rows
+        .iter()
+        .position(|r| matches!(r, Row::Item { number: 1, .. }))
+        .unwrap();
+    for _ in 0..at {
+        f.app.handle_project_key(&key(KeyCode::Down));
+    }
+    f.app.handle_project_key(&key(KeyCode::Char('r')));
+    let confirm = render(&f.app);
+    assert!(confirm.contains("Run the next step of #1"), "{confirm}");
+    assert!(confirm.contains("generate-plan"), "{confirm}");
+    assert!(!started.exists(), "nothing starts before the yes");
+    f.app.handle_project_key(&key(KeyCode::Char('y')));
+    let start = Instant::now();
+    while !started.exists() {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the step was not started"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    let said = std::fs::read_to_string(&started).unwrap();
+    assert_eq!(
+        said.trim(),
+        format!("project run 1 --dir {}", f.ws.display())
+    );
+
+    // a Story has no document step: `r` says what it waits on instead
+    for _ in 0..2 {
+        f.app.handle_project_key(&key(KeyCode::Char(']')));
+    }
+    assert_eq!(view(&f.app).screen, Screen::Ready);
+    f.app.handle_project_key(&key(KeyCode::Down));
+    f.app.handle_project_key(&key(KeyCode::Char('r')));
+    assert!(view(&f.app).modal.is_none());
 }

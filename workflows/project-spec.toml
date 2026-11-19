@@ -1,0 +1,28 @@
+# A step of the Projects flow (docs/project.md): one read-only session.
+# The session writes no file: its answer is checked by agent-mux, which
+# commits a document and opens its pull request, or records the findings.
+[workflow]
+name = "project-spec"
+description = "Write the functional specification (spec.md) of a Feature from its issue."
+when_to_use = "Started by `agent-mux project run` for a Feature with no spec.md."
+output = "work"
+default_isolation = "none"
+
+[args.issue]
+description = "The Feature's issue: title, description and labels, as JSON."
+required = true
+[args.workspace]
+description = "The code repositories of the Project and their folders, when the hub holds only documents."
+default = ""
+
+[schemas.document]
+fields.document = { type = "string", required = true }
+
+[[steps]]
+id = "work"
+phase = "Work"
+agent = "spec-writer"
+skill = "wf-project-spec"
+isolation = "none"
+args = { issue = "{args.issue}", workspace = "{args.workspace}" }
+result = "document"

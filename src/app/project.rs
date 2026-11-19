@@ -32,6 +32,8 @@ pub enum Screen {
     Home,
     Board,
     Backlog,
+    Spec,
+    Review,
     Ready,
     Bugs,
     Uat,
@@ -40,10 +42,12 @@ pub enum Screen {
 }
 
 impl Screen {
-    pub const ALL: [Screen; 8] = [
+    pub const ALL: [Screen; 10] = [
         Screen::Home,
         Screen::Board,
         Screen::Backlog,
+        Screen::Spec,
+        Screen::Review,
         Screen::Ready,
         Screen::Bugs,
         Screen::Uat,
@@ -56,6 +60,8 @@ impl Screen {
             Screen::Home => "Home",
             Screen::Board => "Board",
             Screen::Backlog => "Backlog",
+            Screen::Spec => "Specification",
+            Screen::Review => "Technical review",
             Screen::Ready => "Ready",
             Screen::Bugs => "Bugs",
             Screen::Uat => "UAT and release",
@@ -159,7 +165,7 @@ pub struct ProjectView {
     pub focus: Focus,
     pub rows: Vec<Row>,
     /// The list cursor of each screen.
-    pub cursors: [usize; 8],
+    pub cursors: [usize; 10],
     pub tab: usize,
     pub scroll: u16,
     pub filter: String,
@@ -198,7 +204,7 @@ impl ProjectView {
             screen: Screen::Home,
             focus: Focus::List,
             rows: Vec::new(),
-            cursors: [0; 8],
+            cursors: [0; 10],
             tab: 0,
             scroll: 0,
             filter: String::new(),
@@ -286,6 +292,8 @@ impl ProjectView {
             Screen::Home => needs_you(s).len(),
             Screen::Board => s.items.iter().filter(|i| i.open).count(),
             Screen::Backlog => backlog_features(s).len(),
+            Screen::Spec => spec_groups(s).iter().map(|(_, _, v)| v.len()).sum(),
+            Screen::Review => review_groups(s).iter().map(|(_, _, v)| v.len()).sum(),
             Screen::Ready => s
                 .items
                 .iter()
@@ -513,7 +521,7 @@ impl ProjectView {
         let hub_root = self.hub_root();
         if !ctrl
             && let KeyCode::Char(c) = key.code
-            && matches!(c, 'm' | 'M' | 't' | 'R' | 'D')
+            && matches!(c, 'm' | 'M' | 't' | 'R' | 'D' | 'r')
         {
             return self.verb_key(c).unwrap_or(Outcome::None);
         }
@@ -648,6 +656,10 @@ pub enum Op {
     },
     /// The board moves the pull requests already justify.
     Advance(Vec<ops::AutoMove>),
+    /// Run the item's next document step, as `agent-mux project run`.
+    RunStep {
+        number: u64,
+    },
 }
 
 impl Op {
@@ -662,6 +674,7 @@ impl Op {
             Op::Repair { number, .. } => format!("repairing the stage of #{number}"),
             Op::Triage { number, .. } => format!("triaging #{number}"),
             Op::Advance(m) => format!("making {} board move(s)", m.len()),
+            Op::RunStep { number } => format!("starting the next step of #{number}"),
         }
     }
 }
@@ -756,7 +769,7 @@ impl ProjectView {
 
     /// A verb's key. `None`: the key is not a verb here.
     fn verb_key(&mut self, c: char) -> Option<Outcome> {
-        if !matches!(c, 'n' | 'm' | 'M' | 't' | 'R' | 'D' | 'A') {
+        if !matches!(c, 'n' | 'm' | 'M' | 't' | 'R' | 'D' | 'A' | 'r') {
             return None;
         }
         if self.snap.is_none() {
@@ -768,6 +781,43 @@ impl ProjectView {
         let target = self.target().cloned();
         let need = |what: &str| Some(Outcome::Notice(format!("select an item to {what}")));
         match c {
+            'r' => {
+                let Some(it) = target else {
+                    return need("run its next step");
+                };
+                let Some(snap) = &self.snap else {
+                    return Some(Outcome::None);
+                };
+                let d = next::next_step(&it);
+                let line = cli::decision_lines(&d).join(" · ");
+                use next::Action::*;
+                let runs = matches!(
+                    d.action,
+                    GenerateSpec | GeneratePlan | GenerateBug | Validate
+                ) && d.blocked.is_none();
+                if !runs {
+                    let said = cli::decision_lines(&next::describe(&it, snap)).join(" · ");
+                    return Some(Outcome::Notice(format!("#{}: {said}", it.number)));
+                }
+                let mut lines = vec![format!("Run the next step of #{}: {line}", it.number)];
+                if d.action == Validate {
+                    lines.push("It checks the merged documents and, if they pass, adds the approval label.".into());
+                    lines.push("It comments on the issue either way.".into());
+                } else {
+                    lines.push("A read-only session on Claude Code writes the document.".into());
+                    lines.push(
+                        "agent-mux then publishes it on a pull request and comments on the issue."
+                            .into(),
+                    );
+                    if d.action != GenerateSpec {
+                        lines.push("A second session audits it; a grave finding adds `spec-wave:critique-failed`.".into());
+                    }
+                }
+                self.modal = Some(Modal::Confirm {
+                    lines,
+                    op: Op::RunStep { number: it.number },
+                });
+            }
             'n' => {
                 let parent = target.as_ref().filter(|t| {
                     matches!(
@@ -1495,6 +1545,16 @@ pub fn rows_for(
                 rows.push(Row::Milestone(None));
             }
         }
+        Screen::Spec => {
+            for (key, text, items) in spec_groups(s) {
+                group(&mut rows, key.into(), text.into(), items, 0);
+            }
+        }
+        Screen::Review => {
+            for (key, text, items) in review_groups(s) {
+                group(&mut rows, key.into(), text.into(), items, 0);
+            }
+        }
         Screen::Bugs => {
             // triage first, then the flow's order
             let stages: Vec<&str> = track(ItemType::Bug).unwrap_or_default();
@@ -1547,6 +1607,92 @@ pub fn rows_for(
         }
     }
     rows
+}
+
+type Groups<'a> = Vec<(&'static str, &'static str, Vec<&'a Item>)>;
+
+fn open_features(s: &Snapshot) -> Vec<&Item> {
+    let mut out: Vec<&Item> = s
+        .items
+        .iter()
+        .filter(|i| i.open && i.item_type == Some(ItemType::Feature))
+        .collect();
+    out.sort_by(by_priority);
+    out
+}
+
+/// Specification: Features prioritized or in Spec, by where their
+/// spec.md is.
+pub fn spec_groups(s: &Snapshot) -> Groups<'_> {
+    use crate::project::DocState::*;
+    let at = |i: &Item| {
+        matches!(
+            stage::shown(i).stage.as_str(),
+            STAGE_PRIORITIZED | STAGE_SPEC
+        ) && i.doc_state("plan") == Missing
+    };
+    let of = |want: fn(crate::project::DocState) -> bool| -> Vec<&Item> {
+        open_features(s)
+            .into_iter()
+            .filter(|i| at(i) && want(i.doc_state("spec")))
+            .collect()
+    };
+    vec![
+        (
+            "spec:write",
+            "spec to write",
+            of(|d| matches!(d, Missing | Unknown)),
+        ),
+        (
+            "spec:review",
+            "spec in review (merge its pull request)",
+            of(|d| matches!(d, Pr | Branch)),
+        ),
+        (
+            "spec:merged",
+            "spec merged: the plan is next",
+            of(|d| d == Base),
+        ),
+    ]
+}
+
+/// Technical review: Features whose plan is being written, audited or
+/// waits for its validation.
+pub fn review_groups(s: &Snapshot) -> Groups<'_> {
+    use crate::project::DocState::*;
+    let mut failed = Vec::new();
+    let mut in_review = Vec::new();
+    let mut validate = Vec::new();
+    for i in open_features(s) {
+        if i.has_label(LABEL_PLAN_APPROVED) || i.has_label(LABEL_DECOMPOSED) {
+            continue;
+        }
+        let plan = i.doc_state("plan");
+        let in_plan = stage::shown(i).stage == STAGE_PLAN;
+        if i.has_label(LABEL_CRITIQUE_FAILED) || i.has_label(LABEL_NEEDS_HUMAN) {
+            failed.push(i);
+        } else if matches!(plan, Pr | Branch) {
+            in_review.push(i);
+        } else if plan == Base {
+            validate.push(i);
+        } else if in_plan {
+            // in the Plan column with no plan yet
+            in_review.push(i);
+        }
+    }
+    vec![
+        (
+            "review:failed",
+            "the critique failed: correct the plan",
+            failed,
+        ),
+        ("review:plan", "plan being written or in review", in_review),
+        (
+            "review:validate",
+            "plan merged: validate to approve",
+            validate,
+        ),
+    ]
 }
 
 /// The open Features of a milestone (`None`: of no milestone).
@@ -1603,6 +1749,23 @@ impl App {
         if stale {
             self.project_sync();
         }
+    }
+
+    /// Starts `agent-mux project <args>` as its own process and answers
+    /// the file its output goes to.
+    fn start_project_process(&self, name: &str, args: &[String]) -> Result<PathBuf, String> {
+        let exe = match &self.project_exe {
+            Some(p) => p.clone(),
+            None => std::env::current_exe().map_err(|e| e.to_string())?,
+        };
+        crate::factory::intake::spawn_cli_as(
+            &exe,
+            "project",
+            &self.workflows_runtime_dir(),
+            self.trace_db_path.as_deref(),
+            name,
+            args,
+        )
     }
 
     /// The Project of `need`, on its item's screen.
@@ -1764,6 +1927,25 @@ impl App {
             return;
         };
         let Some(cfg) = view.cfg.clone() else { return };
+        if let Op::RunStep { number } = &op {
+            // a step takes minutes and runs a harness: it is a process of
+            // its own, as the factory's are, and the runs view follows it
+            let args = vec![
+                "run".to_string(),
+                number.to_string(),
+                "--dir".to_string(),
+                cfg.root().to_string_lossy().into_owned(),
+            ];
+            let name = format!("project-run-{number}-{}", crate::project::now_ns());
+            self.notice = Some(match self.start_project_process(&name, &args) {
+                Ok(log) => Notice::info(format!(
+                    "started the next step of #{number}; its output is in {}. [Ctrl+R] reads the result",
+                    log.display()
+                )),
+                Err(e) => Notice::error(format!("project: {e}")),
+            });
+            return;
+        }
         if view.op_rx.is_some() {
             return;
         }
@@ -1793,6 +1975,7 @@ impl App {
                     of,
                 } => run.triage(action, *number, severity.as_deref(), reason.as_deref(), *of),
                 Op::Advance(moves) => run.apply_moves(moves),
+                Op::RunStep { .. } => Err("a step is started as its own process".to_string()),
             };
             // what changed is read again, into the screen and the cache
             let mut fresh = None;
@@ -2056,10 +2239,12 @@ mod tests {
         // the first Esc clears the filter, the second closes
         assert_eq!(v.handle_key(&key(KeyCode::Esc)), Outcome::None);
         assert!(v.filter.is_empty());
-        assert_eq!(
-            v.handle_key(&key(KeyCode::Char('r')).clone()),
-            Outcome::None
-        );
+        // plain `r` is a verb (run the next step): on a heading it only
+        // says to select an item, and reloads nothing
+        assert!(matches!(
+            v.handle_key(&key(KeyCode::Char('r'))),
+            Outcome::Notice(_)
+        ));
         assert_eq!(
             v.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
             Outcome::Sync

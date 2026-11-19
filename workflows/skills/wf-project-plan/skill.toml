@@ -1,0 +1,7 @@
+# agent-mux metadata: a step skill of the Projects flow (docs/project.md),
+# ported from spec-wave's model prompt of the same step. hidden = true keeps
+# it out of the Agents sidebar. Only the harnesses agent-mux traces run it.
+name = "Project plan"
+icon = "¶"
+hidden = true
+harnesses = ["claude", "codex", "agy", "opencode", "muse", "cursor"]

@@ -2,7 +2,7 @@
 
 A **Project** is a repository configured with spec-wave, opened in agent-mux: its epics, features, stories, tasks and bugs, read from its GitHub issues and its Projects v2 board, each with its stage, its documents, its pull requests and its next step.
 
-Phases 1 and 2 are built: reading a Project, and the first changes to it (create an item, move a card, repair a stage, triage a Bug, bring the board up to its pull requests). Every change is one you ask for and confirm. agent-mux never writes `.spec-wave.json`. Running a step (spec, plan, decomposition, build) and the dev-agent fleet are the later phases of the design: `docs/superpowers/specs/2026-11-18-issue-based-project-management-design.md`.
+Three things are built: reading a Project, the first changes to it (create an item, move a card, repair a stage, triage a Bug, bring the board up to its pull requests), and running its document steps (spec, plan, bug document, their critique and validation). Every change is one you ask for and confirm. agent-mux never writes `.spec-wave.json`. The decomposition into Stories, the build and the dev-agent fleet are the later phases of the design: `docs/superpowers/specs/2026-11-18-issue-based-project-management-design.md`.
 
 ## 1. What you need
 
@@ -20,6 +20,8 @@ F1 → **Open project** opens the Project of the selected session's folder.
 | Home | What waits on you (a document to review and merge, a plan to validate, a draft to apply, a bug to triage), where a step can run, and what is in development, code review and QA |
 | Board | Every stage of the flow with its items. A retired column or one made by hand is listed after the flow's own, marked |
 | Backlog | Initiative → Epic → Feature, for what is still before Spec |
+| Specification | Features prioritized or in Spec: spec to write, spec in review, spec merged |
+| Technical review | Features whose plan is being written or reviewed, whose critique failed, or that wait for validation |
 | Ready | The Stories that are ready, under their Feature, in execution order |
 | Bugs | Bugs to triage first, then each later stage of a Bug's track |
 | UAT and release | What is in acceptance (Homologação) and what waits for deploy |
@@ -39,6 +41,7 @@ The left column holds the screens and, under them, the selected screen's rows. T
 | `o` | The issue in the browser |
 | `Ctrl+R` | Read the Project from GitHub again |
 | `Esc` | Clear the filter, then close |
+| `r` | Run the selected item's next document step |
 | `n` | New work item, under the selected one when it can have children |
 | `m` | Move the selected item to a later stage |
 | `M` | Repair its stage: any stage, earlier ones included, with a reason |
@@ -66,7 +69,38 @@ What agent-mux writes on an issue (the parent line, the triage and repair commen
 
 Items that wait on you are also rows of the inbox (`I`), under **Projects**, for every Project read on this machine. `Enter` opens the item.
 
-## 4. The next step
+## 4. Running a step
+
+`r` on a Feature or a Bug (or `agent-mux project run <n>`) runs its next document step. The order is spec-wave's:
+
+| Item | Step | What happens |
+| --- | --- | --- |
+| Feature with no spec | spec | A session writes `spec.md`; agent-mux publishes it |
+| Feature with a merged spec | plan | A session writes `plan.md` from the merged spec and the tech context; agent-mux publishes it; a second session audits it |
+| Feature with both merged | validate | Rust checks the required sections, cut documents and open `[TODO]` marks; if all pass, `spec-wave:plan-approved` is added |
+| Bug with no document | bug | A session writes `bug.md`; agent-mux publishes it; a second session audits it |
+| Bug with a merged document | validate | Rust checks its six sections; if they are there, `spec-wave:bug-approved` is added |
+
+How a step works:
+
+- **The session is read-only.** It reads the repository and answers the document as text. It writes no file and runs no git command.
+- **agent-mux publishes.** It commits the file on top of the remote's default branch in a temporary worktree, pushes it to `spec-wave/<n>-<step>`, opens a pull request and comments on the issue. Your checkout is not touched, the default branch is never pushed, and nothing is merged.
+- **The next step waits for your merge.** A document in a pull request blocks the step after it (`pr-pending`) and is never generated again over your review.
+- **The critique** answers findings, each `grave` or `menor`, in a 🔎 comment on the issue. A grave one adds `spec-wave:critique-failed` and stops the flow for you: correct the document, remove the label, then `agent-mux project run <n> --step critique` audits it again as it is. The third failed audit in a row adds `spec-wave:needs-human` and calls no model.
+- **The comments and labels are spec-wave's**, the attempt marker included, so either tool counts the other's attempts.
+
+```
+agent-mux project run <n> --dry-run     what would run, and nothing else
+agent-mux project run <n>               run it
+agent-mux project run <n> --step critique|validate|spec|plan|bug
+agent-mux project run <n> --harness codex --critic claude
+```
+
+A step runs on Claude Code unless `--harness` names another; only the six harnesses agent-mux traces are accepted. `--critic` puts the audit on a different harness. On Claude Code the model is the one `.spec-wave.json` asks for (`ai.models`, `ai.escalationModel` from the second audit, a `spec-wave:model:<alias>` label on the issue). From a screen, `r` starts the step as a process of its own, on Claude Code; the notice names its log file, and the run is in the runs view (`W`) like any flow's.
+
+The four flows (`project-spec`, `project-plan`, `project-bug`, `project-critique`), their step skills (`wf-project-*`, ported from spec-wave's prompts, in Portuguese) and their agents (`spec-writer`, `tech-lead`, `critic`) are in the Configuration view (`C`) and can be edited like any other.
+
+## 5. The next step
 
 Every card ends with the item's next step and why. It is the answer spec-wave's own `run` gives for the same issue: the code is a port of its `nextStep`.
 
@@ -90,7 +124,7 @@ Every card ends with the item's next step and why. It is the answer spec-wave's 
 
 Past Ready the line comes from the board: how many children are done, which pull request is in review, whether the QA plan is reviewed.
 
-## 5. Commands
+## 6. Commands
 
 ```
 agent-mux project doctor [--json]
@@ -117,13 +151,13 @@ Every command takes `--dir DIR`, `--refresh` and `--cached`. A stage is typed as
 
 `doctor` exits 1 when a line fails. Its marks: `✓` works, `!` works with something to know, `✗` must be fixed, `○` could not be checked. It reports, among others, issues that are not on the board, columns outside the flow, labels this version does not know, whether spec-wave's workflows are armed, and a disagreement between `execution.mode` in the file and the repository variable `SPEC_WAVE_EXECUTION`.
 
-## 6. The cache
+## 7. The cache
 
 A read of GitHub takes a few seconds per hundred issues, so it is kept in the trace store (`project_items`, `project_boards`, schema v30) for `cache.ttlSec` of `.spec-wave.json`, 600 seconds when unset. The screens open on the cache at once and read again in the background when it is old. `--refresh` and `Ctrl+R` read now; `--cached` never reads.
 
 The cache holds every open issue and the ones closed in the last 30 days. It is only a cache: delete the rows and `agent-mux project sync` brings everything back.
 
-## 7. What is read, and how
+## 8. What is read, and how
 
 Everything goes through `gh`; agent-mux reads no token. A verb reads the issue it acts on at that moment, never from the cache.
 
@@ -137,10 +171,12 @@ Everything goes through `gh`; agent-mux reads no token. A verb reads the issue i
 
 A read that fails never becomes a fact. A document whose listing failed is `unknown`, not `missing`, and the snapshot carries a warning that Home and Health show.
 
-## 8. Not built yet
+## 9. Not built yet
 
-- Running a step: spec, plan, critique, decomposition, bug document, build, QA.
-- The other screens of the design (Specification, Technical review, Decomposition, Development, Code review, QA, Observability).
+- The decomposition: the draft of Stories and Tasks, its critique, and applying it into issues.
+- The build, QA and the dev-agent fleet.
+- Recording a Tech Leader's decision on a finding (`risk-accepted`).
+- Driving the repository's own Actions by trigger label instead of agent-mux's flows.
 - Editing an item's title, body, milestone or priority from agent-mux.
 - The mouse on the Project screens.
 - A repository with no `.spec-wave.json`.

@@ -940,6 +940,7 @@ fn draw_foot(f: &mut Frame, area: Rect, v: &ProjectView) {
         let mut pairs = vec![
             ("[ ]", "screen"),
             ("Enter", "open"),
+            ("r", "run next step"),
             ("n", "new"),
             ("m", "move"),
         ];

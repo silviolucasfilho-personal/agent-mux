@@ -1,0 +1,47 @@
+# A step of the Projects flow (docs/project.md): one read-only session.
+# The session writes no file: its answer is checked by agent-mux, which
+# commits a document and opens its pull request, or records the findings.
+[workflow]
+name = "project-critique"
+description = "Audit a generated document for contradictions; answers findings, each grave or menor."
+when_to_use = "Started by `agent-mux project run` after a plan or a bug document is written, and to audit a document corrected by hand."
+output = "work"
+default_isolation = "none"
+
+[args.kind]
+description = "What is audited: plan, spec or bug."
+required = true
+[args.document]
+description = "The document, as it is."
+required = true
+[args.issue]
+description = "The issue it comes from."
+required = true
+[args.spec]
+description = "The spec.md, when the plan is audited."
+default = ""
+[args.tech_context]
+description = "The text of .github/config/tech_context.yml."
+default = ""
+[args.tech_override]
+description = "The issue's Tech Override section."
+default = ""
+[args.workspace]
+description = "The code repositories of the Project and their folders, when the hub holds only documents."
+default = ""
+
+[schemas.finding]
+fields.severity = { type = "string", enum = ["grave", "menor"], required = true }
+fields.anchor = { type = "string" }
+fields.text = { type = "string", required = true }
+[schemas.findings]
+fields.findings = { type = "array", items = "finding", required = true }
+
+[[steps]]
+id = "work"
+phase = "Work"
+agent = "critic"
+skill = "wf-project-critique"
+isolation = "none"
+args = { kind = "{args.kind}", document = "{args.document}", issue = "{args.issue}", spec = "{args.spec}", tech_context = "{args.tech_context}", tech_override = "{args.tech_override}", workspace = "{args.workspace}" }
+result = "findings"

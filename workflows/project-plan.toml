@@ -1,0 +1,37 @@
+# A step of the Projects flow (docs/project.md): one read-only session.
+# The session writes no file: its answer is checked by agent-mux, which
+# commits a document and opens its pull request, or records the findings.
+[workflow]
+name = "project-plan"
+description = "Write the technical plan (plan.md) of a Feature from its spec.md and the tech context."
+when_to_use = "Started by `agent-mux project run` for a Feature whose spec.md is merged and that has no plan.md."
+output = "work"
+default_isolation = "none"
+
+[args.issue]
+description = "The Feature's issue: title and description, as JSON."
+required = true
+[args.spec]
+description = "The Feature's spec.md, from the default branch."
+required = true
+[args.tech_context]
+description = "The text of .github/config/tech_context.yml."
+default = ""
+[args.tech_override]
+description = "The issue's Tech Override section."
+default = ""
+[args.workspace]
+description = "The code repositories of the Project and their folders, when the hub holds only documents."
+default = ""
+
+[schemas.document]
+fields.document = { type = "string", required = true }
+
+[[steps]]
+id = "work"
+phase = "Work"
+agent = "tech-lead"
+skill = "wf-project-plan"
+isolation = "none"
+args = { issue = "{args.issue}", spec = "{args.spec}", tech_context = "{args.tech_context}", tech_override = "{args.tech_override}", workspace = "{args.workspace}" }
+result = "document"
