@@ -22,6 +22,7 @@
 use super::config::ProjectConfig;
 use super::contract::*;
 use super::critique::{self, Attempt, Kind};
+use super::decomposition;
 use super::deliver::{self, Artifact};
 use super::docs;
 use super::github::Detail;
@@ -36,6 +37,8 @@ pub const FLOW_SPEC: &str = "project-spec";
 pub const FLOW_PLAN: &str = "project-plan";
 pub const FLOW_BUG: &str = "project-bug";
 pub const FLOW_CRITIQUE: &str = "project-critique";
+pub const FLOW_DECOMPOSE: &str = "project-decompose";
+pub const FLOW_DECOMPOSE_RFC: &str = "project-decompose-rfc";
 
 pub struct Ctx<'a> {
     pub tools: &'a Tools,
@@ -60,6 +63,19 @@ pub struct Generate {
     pub next: Option<&'static str>,
     /// The critique that follows the publication, when there is one.
     pub then_critique: Option<Kind>,
+    /// What the session answers.
+    pub shape: Shape,
+}
+
+/// The shape of a generating session's answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    /// `{document}`: the file's text.
+    Document,
+    /// `{stories}`: a Feature's draft, rendered by Rust as decomposition.md.
+    Stories,
+    /// `{tasks}`: an RFC's draft.
+    Tasks,
 }
 
 /// A critique to run.
@@ -86,6 +102,9 @@ pub enum Planned {
         max: u32,
     },
     Validate,
+    /// Create the Stories and Tasks of the reviewed draft: a person's
+    /// approval, never automatic.
+    Apply,
     /// A step of the flow that agent-mux does not run yet.
     NotBuilt(Action),
 }
@@ -261,15 +280,26 @@ impl<'a> Ctx<'a> {
             return Ok(Planned::NeedsHuman { kind, attempt, max });
         }
         let t = item.item_type.unwrap_or(ItemType::Feature);
-        let (spec, tech_context, tech_override_text) = if kind == Kind::Plan {
-            (
-                self.base_file(&doc_path(t, &item.title, "spec"))?
-                    .unwrap_or_default(),
+        let spec_of = || -> Result<String, String> {
+            Ok(self
+                .base_file(&doc_path(t, &item.title, "spec"))?
+                .unwrap_or_default())
+        };
+        let (spec, plan, tech_context, tech_override_text) = match kind {
+            Kind::Plan => (
+                spec_of()?,
+                String::new(),
                 self.tech_context(),
                 tech_override(&detail.body),
-            )
-        } else {
-            Default::default()
+            ),
+            Kind::Stories if t == ItemType::Feature => (
+                spec_of()?,
+                self.base_file(&doc_path(t, &item.title, "plan"))?
+                    .unwrap_or_default(),
+                String::new(),
+                String::new(),
+            ),
+            _ => Default::default(),
         };
         let issue = if kind == Kind::Bug {
             bug_report(detail)
@@ -283,6 +313,7 @@ impl<'a> Ctx<'a> {
                 "document": document,
                 "issue": issue,
                 "spec": spec,
+                "plan": plan,
                 "tech_context": tech_context,
                 "tech_override": tech_override_text,
                 "workspace": self.workspace_arg(),
@@ -341,6 +372,7 @@ impl<'a> Ctx<'a> {
                 path: doc_path(ft, &item.title, "spec"),
                 next: Some("plan"),
                 then_critique: None,
+                shape: Shape::Document,
             })),
             Action::GeneratePlan => {
                 let spec_path = doc_path(ft, &item.title, "spec");
@@ -363,6 +395,7 @@ impl<'a> Ctx<'a> {
                     path: doc_path(ft, &item.title, "plan"),
                     next: Some("validate"),
                     then_critique: Some(Kind::Plan),
+                    shape: Shape::Document,
                 }))
             }
             Action::GenerateBug => Ok(Planned::Generate(Generate {
@@ -382,6 +415,7 @@ impl<'a> Ctx<'a> {
                 path: doc_path(ItemType::Bug, &item.title, "bug"),
                 next: Some("validate"),
                 then_critique: Some(Kind::Bug),
+                shape: Shape::Document,
             })),
             Action::Critique => {
                 let (kind, doc) = match t {
@@ -395,6 +429,74 @@ impl<'a> Ctx<'a> {
                 self.critique_job(item, detail, kind, &document)
             }
             Action::Validate => Ok(Planned::Validate),
+            Action::Decompose => {
+                let path = doc_path(ft, &item.title, "decomposition");
+                // a draft that is there is audited as it is: a person may
+                // have corrected it, and generating again would lose that
+                if let Some(document) = self.base_file(&path)? {
+                    return self.critique_job(item, detail, Kind::Stories, &document);
+                }
+                let feature = ft == ItemType::Feature;
+                let (spec, plan) = if feature {
+                    let dir = doc_dir(ft, &item.title);
+                    let need = |file: &str| -> Result<String, String> {
+                        let p = format!("{dir}/{file}");
+                        self.base_file(&p)?.ok_or_else(|| {
+                            format!("`{p}` is not on the default branch: the decomposition is drafted from the merged spec and plan")
+                        })
+                    };
+                    (need("spec.md")?, need("plan.md")?)
+                } else {
+                    Default::default()
+                };
+                // a decision nobody took would become a Story built on a guess
+                let open: Vec<String> = [("spec.md", &spec), ("plan.md", &plan)]
+                    .iter()
+                    .flat_map(|(name, text)| {
+                        docs::open_todos(text)
+                            .into_iter()
+                            .map(move |t| format!("{name}:{} {}", t.line, t.excerpt))
+                    })
+                    .collect();
+                if !open.is_empty() {
+                    return Err(format!(
+                        "the spec or the plan still has {} open [TODO] mark(s); decide each one before decomposing: {}",
+                        open.len(),
+                        open.iter().take(5).cloned().collect::<Vec<_>>().join("; ")
+                    ));
+                }
+                let repos: Vec<String> = self
+                    .cfg
+                    .repositories
+                    .iter()
+                    .map(|r| r.slug.clone())
+                    .collect();
+                Ok(Planned::Generate(Generate {
+                    doc: "decomposition",
+                    flow: if feature {
+                        FLOW_DECOMPOSE
+                    } else {
+                        FLOW_DECOMPOSE_RFC
+                    },
+                    args: json!({
+                        "kind": if feature { "feature" } else { "rfc" },
+                        "issue": format!("#{} {}\n\n{}", item.number, detail.title, detail.body),
+                        "spec": spec,
+                        "plan": plan,
+                        "repos": repos.join(", "),
+                        "workspace": self.workspace_arg(),
+                    }),
+                    path,
+                    next: Some("apply"),
+                    then_critique: Some(Kind::Stories),
+                    shape: if feature {
+                        Shape::Stories
+                    } else {
+                        Shape::Tasks
+                    },
+                }))
+            }
+            Action::DecomposeApply => Ok(Planned::Apply),
             other => Ok(Planned::NotBuilt(other)),
         }
     }
@@ -408,11 +510,38 @@ impl<'a> Ctx<'a> {
         g: &Generate,
         result: &Value,
     ) -> Result<(Report, Option<Planned>), String> {
-        let raw = result
-            .get("document")
-            .and_then(Value::as_str)
-            .ok_or("the session answered no `document`")?;
-        let content = docs::unwrap_generated(raw);
+        let content = match g.shape {
+            Shape::Document => {
+                let raw = result
+                    .get("document")
+                    .and_then(Value::as_str)
+                    .ok_or("the session answered no `document`")?;
+                docs::unwrap_generated(raw)
+            }
+            // the draft's file is rendered here, never written by a model
+            Shape::Stories | Shape::Tasks => {
+                let kind = if g.shape == Shape::Stories {
+                    decomposition::Kind::Stories
+                } else {
+                    decomposition::Kind::Tasks
+                };
+                let draft = decomposition::from_model(result, kind, &detail.title, item.number)?;
+                let known: Vec<&str> = self
+                    .cfg
+                    .repositories
+                    .iter()
+                    .map(|r| r.slug.as_str())
+                    .collect();
+                for s in &draft.stories {
+                    if let Some(bad) = s.repos.iter().find(|r| !known.contains(&r.as_str())) {
+                        return Err(format!(
+                            "the draft names a repository `{bad}` that is not in .spec-wave.json; nothing was published"
+                        ));
+                    }
+                }
+                decomposition::render(&draft)
+            }
+        };
         // a document cut short would pass a look and is worth nothing
         let cut = docs::incomplete_signs(&content);
         if !cut.is_empty() {
@@ -434,6 +563,7 @@ impl<'a> Ctx<'a> {
                 path: &g.path,
                 content: &content,
                 next_step: g.next,
+                extra: &[],
             },
         )?;
         let hub = self.cfg.hub_repo().slug();
@@ -452,6 +582,9 @@ impl<'a> Ctx<'a> {
             }
             "plan" => {
                 "Revise o plano **no Pull Request** e faça o merge. Depois, valide a Feature."
+            }
+            "decomposition" => {
+                "Este é um **rascunho**: nenhuma issue foi criada. Revise e edite as Stories e Tasks **no Pull Request**, faça o merge e então aplique a decomposição."
             }
             _ => {
                 "Revise **Causa Raiz** e **Teste de Regressão** **no Pull Request** e faça o merge. Depois, valide o bug."
@@ -531,6 +664,10 @@ impl<'a> Ctx<'a> {
         r.touched.push(item.number);
         if grave > 0 {
             write::add_label(self.tools, self.cfg, item.number, LABEL_CRITIQUE_FAILED)?;
+            if job.kind == Kind::Stories && item.has_label(LABEL_DECOMPOSE_READY) {
+                let _ =
+                    write::remove_label(self.tools, self.cfg, item.number, LABEL_DECOMPOSE_READY);
+            }
             r.lines.push(format!(
                 "! the critique of {} found {grave} grave finding(s) (attempt {}/{}): `{LABEL_CRITIQUE_FAILED}` is on #{}",
                 job.kind.document(),
@@ -547,6 +684,14 @@ impl<'a> Ctx<'a> {
                 job.kind.document(),
                 findings.len()
             ));
+            if job.kind == Kind::Stories {
+                // the draft passed: it waits for a person, who applies it
+                write::add_label(self.tools, self.cfg, item.number, LABEL_DECOMPOSE_READY)?;
+                r.lines.push(format!(
+                    "`{LABEL_DECOMPOSE_READY}` is on #{}: review the draft, merge it, then apply",
+                    item.number
+                ));
+            }
         }
         Ok(r)
     }
@@ -1021,9 +1166,12 @@ mod tests {
                 },
             );
         }
-        assert_eq!(
-            f.ctx().plan(&ready, &detail(""), None).unwrap(),
-            Planned::NotBuilt(Action::Decompose)
+        // approved, with no documents merged: the draft cannot be written yet
+        assert!(
+            f.ctx()
+                .plan(&ready, &detail(""), None)
+                .unwrap_err()
+                .contains("not on the default branch")
         );
         assert!(forced_action("plan", Some(ItemType::Bug)).is_err());
         assert!(forced_action("apply", Some(ItemType::Feature)).is_err());
@@ -1060,5 +1208,138 @@ mod tests {
         );
         assert_eq!(tech_override("a\n## tech override\nx\n# fim\ny"), "x");
         assert_eq!(tech_override("nada"), "");
+    }
+    #[test]
+    fn a_decomposition_is_drafted_rendered_and_waits_for_a_person() {
+        let f = fx(r#","repositories":[{"slug":"api","owner":"acme","repo":"api"}]"#);
+        let mut it = item(1, "[FEATURE] Pedidos", &["[FEATURE]", LABEL_PLAN_APPROVED]);
+        for doc in ["spec", "plan"] {
+            it.docs.insert(
+                doc.into(),
+                crate::project::Doc {
+                    state: DocState::Base,
+                    path: format!("docs/features/pedidos/{doc}.md"),
+                    pr: None,
+                    branch: None,
+                },
+            );
+        }
+        let d = detail("corpo");
+        // an open decision in the plan stops the draft before any session
+        f.merge("docs/features/pedidos/spec.md", SPEC);
+        f.merge(
+            "docs/features/pedidos/plan.md",
+            &format!("{PLAN}\n[TODO: requer esclarecimento do PO]\n"),
+        );
+        assert!(
+            f.ctx()
+                .plan(&it, &d, None)
+                .unwrap_err()
+                .contains("open [TODO]")
+        );
+        f.merge("docs/features/pedidos/plan.md", PLAN);
+
+        let Planned::Generate(g) = f.ctx().plan(&it, &d, None).unwrap() else {
+            panic!("not a draft")
+        };
+        assert_eq!(
+            (g.doc, g.flow, g.shape),
+            ("decomposition", FLOW_DECOMPOSE, Shape::Stories)
+        );
+        assert_eq!(g.args["kind"], "feature");
+        assert_eq!(g.args["repos"], "api");
+        assert_eq!(g.args["plan"], PLAN);
+        // a repository the configuration does not know is refused
+        let alien = json!({"stories": [{"title": "a", "repos": ["mobile"], "tasks": [{"title": "t", "body": ""}]}]});
+        assert!(
+            f.ctx()
+                .finish_generate(&it, &d, &g, &alien)
+                .unwrap_err()
+                .contains("`mobile`")
+        );
+        assert!(f.calls().is_empty());
+
+        let draft = json!({"stories": [
+            {"title": "ver pedidos", "userStory": "Como cliente, quero ver", "body": "ctx", "dependsOn": [], "repos": ["api"],
+             "tasks": [{"title": "criar endpoint", "body": "GET /pedidos"}]},
+            {"title": "cancelar pedido", "tasks": [{"title": "endpoint", "body": "DELETE"}]}]});
+        let (r, follow) = f.ctx().finish_generate(&it, &d, &g, &draft).unwrap();
+        assert!(
+            r.lines[0].contains("decomposition.md published on spec-wave/1-decompose"),
+            "{r:?}"
+        );
+        // the file is rendered by Rust, in spec-wave's format, and no issue exists
+        let out = Command::new("git")
+            .args([
+                "show",
+                "spec-wave/1-decompose:docs/features/pedidos/decomposition.md",
+            ])
+            .current_dir(f.root.join("origin.git"))
+            .output()
+            .unwrap();
+        let file = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(file.starts_with("# Decomposição — [FEATURE] Pedidos\n<!-- spec-wave:decomposition v1 issue=1 kind=stories -->"), "{file}");
+        assert!(file.contains(
+            "## Story 2 — cancelar pedido\n\n**User story:** —\n**Depende de:** Story 1"
+        ));
+        assert!(
+            !f.calls()
+                .iter()
+                .any(|c| c.contains("POST repos/acme/hub/issues"))
+        );
+        assert!(
+            f.calls()
+                .iter()
+                .any(|c| c.contains("Este é um **rascunho**: nenhuma issue foi criada."))
+        );
+
+        // the audit that follows reads the draft with the spec and the plan
+        let Some(Planned::Critique(job)) = follow else {
+            panic!("no critique followed")
+        };
+        assert_eq!(job.kind, Kind::Stories);
+        assert_eq!(job.args["document"], file);
+        assert_eq!(job.args["plan"], PLAN);
+        // clean: the draft waits for a person
+        f.ctx()
+            .finish_critique(&it, &job, &json!({"findings": []}), "")
+            .unwrap();
+        assert_eq!(
+            f.calls().last().unwrap(),
+            "issue edit 1 -R acme/hub --add-label spec-wave:decompose-ready "
+        );
+        // grave: it is blocked, and no longer ready
+        it.labels.push(LABEL_DECOMPOSE_READY.to_string());
+        let grave = json!({"findings": [{"severity": "grave", "anchor": "Story 2", "text": "depende do que não existe"}]});
+        f.ctx().finish_critique(&it, &job, &grave, "").unwrap();
+        let calls = f.calls();
+        assert!(calls[calls.len() - 2].contains("--add-label spec-wave:critique-failed"));
+        assert!(calls[calls.len() - 1].contains("--remove-label spec-wave:decompose-ready"));
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.contains("**Story 2** — depende do que não existe")
+                    && c.contains("nenhuma Story/Task foi criada"))
+        );
+
+        // once a draft is on the base it is audited as it is, never drafted again
+        it.labels.retain(|l| l != LABEL_DECOMPOSE_READY);
+        f.merge("docs/features/pedidos/decomposition.md", &file);
+        let Planned::Critique(again) = f.ctx().plan(&it, &d, None).unwrap() else {
+            panic!("a merged draft must be audited, not regenerated")
+        };
+        assert_eq!(again.args["document"], file);
+        // and with the label a person's approval is what is next
+        it.labels.push(LABEL_DECOMPOSE_READY.to_string());
+        it.docs.insert(
+            "decomposition".into(),
+            crate::project::Doc {
+                state: DocState::Base,
+                path: String::new(),
+                pr: None,
+                branch: None,
+            },
+        );
+        assert_eq!(f.ctx().plan(&it, &d, None).unwrap(), Planned::Apply);
     }
 }

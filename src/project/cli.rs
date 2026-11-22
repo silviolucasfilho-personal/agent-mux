@@ -35,10 +35,12 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
   agent-mux project advance [--yes]
         the board moves the pull requests already justify; without --yes, only the plan
 
-  agent-mux project run <n> [--step spec|plan|bug|critique|validate] [--harness H] [--critic H] [--dry-run]
+  agent-mux project run <n> [--step spec|plan|bug|critique|validate] [--harness H] [--critic H] [--dry-run] [--apply]
         run the item's next document step: a read-only session writes the document,
         agent-mux publishes it by pull request and comments on the issue; a plan and
-        a bug document are then audited by a second session
+        a bug document are then audited by a second session; a decomposition is
+        drafted the same way, and --apply creates its Stories and Tasks once you
+        reviewed and merged the draft
 
   every command: [--dir DIR] [--refresh] [--cached]
 
@@ -551,6 +553,25 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
             Planned::NotBuilt(action) => {
                 println!("  next: {}", action.as_str());
                 println!("  agent-mux does not run this step yet");
+                break;
+            }
+            Planned::Apply => {
+                // the draft is read and checked before anything is asked
+                let (doc, path) = ctx.apply_plan(&item, &s).map_err(|x| anyhow::anyhow!(x))?;
+                println!("  next: apply the reviewed draft `{path}`");
+                for line in super::apply::preview(&doc) {
+                    println!("  {line}");
+                }
+                if a.flag("--dry-run") || !a.flag("--apply") {
+                    println!(
+                        "  applying creates these issues and is your approval of the draft: run again with --apply"
+                    );
+                    break;
+                }
+                let r = ctx
+                    .apply(&item, &detail, &s, doc, &path)
+                    .map_err(|x| anyhow::anyhow!(x))?;
+                finish_report(&r, &mut touched);
                 break;
             }
             Planned::Validate if a.flag("--dry-run") => {

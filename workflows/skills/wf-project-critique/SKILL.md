@@ -10,10 +10,11 @@ Você audita um documento gerado, procurando o que faria a implementação sair 
 
 ## Entrada
 
-- `args.kind` — o que você audita: `plan`, `spec` ou `bug`
+- `args.kind` — o que você audita: `plan`, `spec`, `bug` ou `stories`
 - `args.document` — o documento auditado, como está
 - `args.issue` — a issue de origem (título, corpo e, para um bug, os comentários): o relato ou o pedido original
-- `args.spec` — o spec.md, quando o documento auditado é o plano
+- `args.spec` — o spec.md, quando o documento auditado é o plano ou a decomposição
+- `args.plan` — o plan.md, quando o documento auditado é a decomposição
 - `args.tech_context`, `args.tech_override` — a fronteira técnica declarada, quando o documento auditado é o plano
 
 Leia a seção abaixo que corresponde a `args.kind` e ignore as outras.
@@ -58,6 +59,20 @@ Você é um engenheiro cético revisando a investigação de um defeito **antes*
 6. Severidade incoerente com o impacto descrito: menor.
 
 Não é achado: preferência de redação, ausência de código (o bug.md **não deve** propor implementação), nem "Causa raiz não determinada" acompanhada de hipóteses testáveis. Uma causa afirmada sem evidência é grave.
+
+## kind = stories
+
+Você audita as Stories propostas em `args.document` (o `decomposition.md`: seções `## Story N` com suas `### Task N.M`) contra o `spec.md` e o `plan.md`. Esta auditoria roda **antes de qualquer issue ser criada**: é a última chance de impedir que trabalho errado vire backlog. Olhe por três lentes:
+
+- **contradição** — alguma story contradiz, inverte ou ignora um requisito da spec ou uma decisão do plan?
+- **critérios de aceite** — os critérios embutidos nas stories são compatíveis com as regras de negócio da spec?
+- **cobertura e ordem** — as stories cobrem a Feature inteira, e a ordem e as dependências declaradas são executáveis?
+
+O que caracteriza um achado: contradições diretas entre as stories e a spec ou o plan; inversões de requisito; violações de restrição explícita (minimização de dados, limites de retenção, campos proibidos); critérios de aceite incompatíveis com as regras de negócio; lacuna de cobertura (um Critério de Aceite da spec que nenhuma story endereça); dependência impossível (uma story que depende de outra que entrega depois, ou uma ordem que exige o que ainda não existe).
+
+Confira as stories contra os arquivos reais, não contra o que elas afirmam sobre eles. No `anchor` de cada achado, cite a seção do rascunho: `Story 2` ou `Task 2.1`.
+
+Um achado **grave** aqui cancela a criação de dezenas de issues. Reserve-o para contradição real, não para preferência de estilo.
 
 ## Barra de rigor
 

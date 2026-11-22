@@ -1,6 +1,6 @@
 # Projects: every spec-wave flow, in agent-mux — design
 
-Status: proposal, 2026-11-18 (third draft). Phases 1 and 2 are implemented (§19, §20), and the first part of phase 3 (§21); nothing else is.
+Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented (§19 to §22); nothing else is.
 
 **The requirement.** Any repository configured with spec-wave must open in
 agent-mux as a **Project** and work there: every flow spec-wave has, each
@@ -1147,3 +1147,28 @@ in Portuguese (decision 5 of §17). Where the code differs from §6:
 - **Not built, the rest of phase 3:** the decomposition (draft, critique,
   apply) and its screen, a Tech Leader's decisions on findings
   (`risk-accepted`), and `engine = "actions"`.
+
+## 22. Phase 3, second part, as built
+
+Built on 2026-11-18: the decomposition (`src/project/{decomposition,apply}.rs`,
+the flows `project-decompose` and `project-decompose-rfc`, the skill
+`wf-project-decompose`, the `stories` kind of the critique, the
+Decomposition screen, `project run --apply`). Where the code differs from
+§6:
+
+- **The draft's session answers data, not a file.** It returns Stories and
+  Tasks as JSON, as spec-wave's model does, and Rust renders
+  `decomposition.md`. A repository the draft names that
+  `.spec-wave.json` does not list refuses the publication.
+- **The journal is a file**, not a table: `apply-<hub>-<n>.json` under the
+  scratch folder, one entry per created issue by its position in the
+  draft, removed when the apply is whole.
+- **Board failures do not fail the apply.** An issue that could not be
+  placed is listed in the comment and in the report, as in spec-wave, and
+  `project move` places it.
+- **Open `[TODO]` marks** in the spec or the plan refuse the draft with
+  an error naming them, where spec-wave also comments on the issue.
+- **The apply's pull request** carries the annotated draft and the
+  dependency map in one commit.
+- **Not built:** a Tech Leader's decisions on findings (`risk-accepted`),
+  `engine = "actions"`, and `order --sync`.

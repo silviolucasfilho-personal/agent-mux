@@ -2,7 +2,7 @@
 
 A **Project** is a repository configured with spec-wave, opened in agent-mux: its epics, features, stories, tasks and bugs, read from its GitHub issues and its Projects v2 board, each with its stage, its documents, its pull requests and its next step.
 
-Three things are built: reading a Project, the first changes to it (create an item, move a card, repair a stage, triage a Bug, bring the board up to its pull requests), and running its document steps (spec, plan, bug document, their critique and validation). Every change is one you ask for and confirm. agent-mux never writes `.spec-wave.json`. The decomposition into Stories, the build and the dev-agent fleet are the later phases of the design: `docs/superpowers/specs/2026-11-18-issue-based-project-management-design.md`.
+Three things are built: reading a Project, the first changes to it (create an item, move a card, repair a stage, triage a Bug, bring the board up to its pull requests), and running its document steps (spec, plan, bug document, their critique and validation, and the decomposition into Stories and Tasks). Every change is one you ask for and confirm. agent-mux never writes `.spec-wave.json`. The build, QA and the dev-agent fleet are the later phases of the design: `docs/superpowers/specs/2026-11-18-issue-based-project-management-design.md`.
 
 ## 1. What you need
 
@@ -22,6 +22,7 @@ F1 → **Open project** opens the Project of the selected session's folder.
 | Backlog | Initiative → Epic → Feature, for what is still before Spec |
 | Specification | Features prioritized or in Spec: spec to write, spec in review, spec merged |
 | Technical review | Features whose plan is being written or reviewed, whose critique failed, or that wait for validation |
+| Decomposition | Approved Features and RFCs on their way to Stories and Tasks: to draft, draft in review, to audit, reviewed and ready to apply |
 | Ready | The Stories that are ready, under their Feature, in execution order |
 | Bugs | Bugs to triage first, then each later stage of a Bug's track |
 | UAT and release | What is in acceptance (Homologação) and what waits for deploy |
@@ -78,6 +79,8 @@ Items that wait on you are also rows of the inbox (`I`), under **Projects**, for
 | Feature with no spec | spec | A session writes `spec.md`; agent-mux publishes it |
 | Feature with a merged spec | plan | A session writes `plan.md` from the merged spec and the tech context; agent-mux publishes it; a second session audits it |
 | Feature with both merged | validate | Rust checks the required sections, cut documents and open `[TODO]` marks; if all pass, `spec-wave:plan-approved` is added |
+| Approved Feature, or an RFC | decompose | A session drafts the Stories and Tasks; agent-mux renders them as `decomposition.md` and publishes it; a second session audits it. No issue is created |
+| Feature or RFC whose draft you reviewed and merged | apply | agent-mux creates the Story and Task issues. No model takes part |
 | Bug with no document | bug | A session writes `bug.md`; agent-mux publishes it; a second session audits it |
 | Bug with a merged document | validate | Rust checks its six sections; if they are there, `spec-wave:bug-approved` is added |
 
@@ -89,6 +92,26 @@ How a step works:
 - **The critique** answers findings, each `grave` or `menor`, in a 🔎 comment on the issue. A grave one adds `spec-wave:critique-failed` and stops the flow for you: correct the document, remove the label, then `agent-mux project run <n> --step critique` audits it again as it is. The third failed audit in a row adds `spec-wave:needs-human` and calls no model.
 - **The comments and labels are spec-wave's**, the attempt marker included, so either tool counts the other's attempts.
 
+### The decomposition
+
+The draft is a file you edit, not a list of issues. `decomposition.md` holds `## Story N` sections, each with a user story, a `**Depende de:**` line and its `### Task N.M` sections. Review and correct it in its pull request:
+
+- Position decides, not the number written: insert a Story in the middle without renumbering.
+- `**Depende de:**` takes earlier Stories (`Story 1`) and existing issues (`#412`), or `—`. A Story that depends on a later one is an error, with its reason.
+- `**Repos:**` names the code repositories a Story touches, by their slugs in `.spec-wave.json`.
+- Anything else under a Story or a Task is its description, Markdown included.
+
+A clean audit adds `spec-wave:decompose-ready`. After you merge the draft, the next step is the apply, and it never runs on its own:
+
+```
+agent-mux project run <n> --dry-run     the Stories and Tasks it would create
+agent-mux project run <n> --apply       create them
+```
+
+The apply creates each Story as `[STORY] …` and each Task as `[TASK] …`, with the Feature's milestone, the `repo:<slug>` labels, the `Depende de: #a, #b` line and GitHub's blocked-by relation, each one a sub-issue of its parent and in Ready on the board. It then moves the Feature to Ready, adds `spec-wave:decomposed`, comments the list and the execution order, and opens one more pull request that records the issue numbers in the draft and writes `dependency-map.json`.
+
+It cannot be applied twice: the label, the draft's own `applied=` mark and existing Story sub-issues each stop it. If it fails halfway (a network error after three issues), run it again: it keeps a journal of what it created and makes only what is missing.
+
 ```
 agent-mux project run <n> --dry-run     what would run, and nothing else
 agent-mux project run <n>               run it
@@ -98,7 +121,7 @@ agent-mux project run <n> --harness codex --critic claude
 
 A step runs on Claude Code unless `--harness` names another; only the six harnesses agent-mux traces are accepted. `--critic` puts the audit on a different harness. On Claude Code the model is the one `.spec-wave.json` asks for (`ai.models`, `ai.escalationModel` from the second audit, a `spec-wave:model:<alias>` label on the issue). From a screen, `r` starts the step as a process of its own, on Claude Code; the notice names its log file, and the run is in the runs view (`W`) like any flow's.
 
-The four flows (`project-spec`, `project-plan`, `project-bug`, `project-critique`), their step skills (`wf-project-*`, ported from spec-wave's prompts, in Portuguese) and their agents (`spec-writer`, `tech-lead`, `critic`) are in the Configuration view (`C`) and can be edited like any other.
+The six flows (`project-spec`, `project-plan`, `project-bug`, `project-critique`, `project-decompose`, `project-decompose-rfc`), their step skills (`wf-project-*`, ported from spec-wave's prompts, in Portuguese) and their agents (`spec-writer`, `tech-lead`, `critic`) are in the Configuration view (`C`) and can be edited like any other.
 
 ## 5. The next step
 
@@ -173,7 +196,6 @@ A read that fails never becomes a fact. A document whose listing failed is `unkn
 
 ## 9. Not built yet
 
-- The decomposition: the draft of Stories and Tasks, its critique, and applying it into issues.
 - The build, QA and the dev-agent fleet.
 - Recording a Tech Leader's decision on a finding (`risk-accepted`).
 - Driving the repository's own Actions by trigger label instead of agent-mux's flows.

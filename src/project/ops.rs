@@ -359,7 +359,7 @@ impl<'a> Ops<'a> {
             new.priority.as_deref(),
         );
         let full_title = format!("{} {title}", t.tag());
-        let created = write::create_issue(self.tools, self.cfg, &full_title, &body, &labels)?;
+        let created = write::create_issue(self.tools, self.cfg, &full_title, &body, &labels, None)?;
         let mut r = Report::default();
         r.touch(created.number);
         r.say(format!(
