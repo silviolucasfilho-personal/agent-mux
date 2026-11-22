@@ -105,6 +105,8 @@ pub enum Planned {
     /// Create the Stories and Tasks of the reviewed draft: a person's
     /// approval, never automatic.
     Apply,
+    /// Build a Story or fix a Bug: code in a worktree, a draft pull request.
+    Build(Box<super::build::Build>),
     /// A step of the flow that agent-mux does not run yet.
     NotBuilt(Action),
 }
@@ -117,9 +119,10 @@ pub fn forced_action(step: &str, t: Option<ItemType>) -> Result<Action, String> 
         "bug" | "generate-bug" => Action::GenerateBug,
         "critique" => Action::Critique,
         "ready" | "validate" => Action::Validate,
+        "build" | "fix" | "implement" => Action::Implement,
         other => {
             return Err(format!(
-                "\"{other}\" is not a step: spec, plan, bug, critique or validate"
+                "\"{other}\" is not a step: spec, plan, bug, critique, validate, build or fix"
             ));
         }
     };
@@ -129,6 +132,7 @@ pub fn forced_action(step: &str, t: Option<ItemType>) -> Result<Action, String> 
         Action::Critique | Action::Validate => {
             matches!(t, Some(ItemType::Feature | ItemType::Bug))
         }
+        Action::Implement => matches!(t, Some(ItemType::Story | ItemType::Bug)),
         _ => false,
     };
     if !ok {
@@ -210,7 +214,7 @@ pub fn tech_override(body: &str) -> String {
 }
 
 /// A comment a tool left, not a person: it is not part of a bug's report.
-fn tool_comment(body: &str) -> bool {
+pub(crate) fn tool_comment(body: &str) -> bool {
     let t = body.trim_start();
     t.contains("<!-- spec-wave:")
         || [
@@ -254,7 +258,7 @@ impl<'a> Ctx<'a> {
             .join("\n")
     }
 
-    fn base_file(&self, path: &str) -> Result<Option<String>, String> {
+    pub(crate) fn base_file(&self, path: &str) -> Result<Option<String>, String> {
         deliver::read_base_file(&self.hub_root, path)
     }
 

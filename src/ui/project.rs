@@ -61,7 +61,11 @@ pub fn draw(f: &mut Frame, area: Rect, v: &ProjectView) {
     let left_width = (body.width * 38 / 100).clamp(32, 52).min(body.width);
     let [left, right] =
         Layout::horizontal([Constraint::Length(left_width), Constraint::Min(0)]).areas(body);
-    let nav_height = (Screen::ALL.len() as u16 + 2).min(left.height);
+    // the list of screens gives way on a short terminal: the rows of the
+    // selected screen keep at least six lines, and the list scrolls
+    let nav_height = (Screen::ALL.len() as u16 + 2)
+        .min(left.height.saturating_sub(6).max(3))
+        .min(left.height);
     let [nav, list] =
         Layout::vertical([Constraint::Length(nav_height), Constraint::Min(0)]).areas(left);
     draw_nav(f, nav, v);
@@ -120,7 +124,10 @@ fn draw_nav(f: &mut Frame, area: Rect, v: &ProjectView) {
             Line::styled(format!("{label}{}{count} ", " ".repeat(pad)), style)
         })
         .collect();
-    f.render_widget(Paragraph::new(lines), inner);
+    // keep the selected screen in sight when the list is cut
+    let at = Screen::ALL.iter().position(|s| *s == v.screen).unwrap_or(0);
+    let scroll = (at + 1).saturating_sub(usize::from(inner.height)) as u16;
+    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
 }
 
 /// A stage in a few characters, for the right edge of a row.

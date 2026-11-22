@@ -252,7 +252,7 @@ fn a_spec_wave_repository_opens_reads_and_draws() {
     f.app.handle_project_key(&key(KeyCode::Esc));
 
     // Health: the checklist, with what could not be checked said so
-    for _ in 0..4 {
+    for _ in 0..6 {
         f.app.handle_project_key(&key(KeyCode::Char(']')));
     }
     assert_eq!(view(&f.app).screen, Screen::Health);
@@ -424,7 +424,7 @@ fn what_waits_on_the_operator_is_in_the_inbox_and_opens_its_item() {
     f.app.open_project();
     wait(&mut f.app, "the read", |a| view(a).snap.is_some());
     // the Bugs screen lists the Bug that waits for its triage
-    for _ in 0..7 {
+    for _ in 0..9 {
         f.app.handle_project_key(&key(KeyCode::Char(']')));
     }
     assert_eq!(view(&f.app).screen, Screen::Bugs);
@@ -501,12 +501,22 @@ fn the_next_step_is_confirmed_then_started_as_its_own_process() {
         format!("project run 1 --dir {}", f.ws.display())
     );
 
-    // a Story has no document step: `r` says what it waits on instead
+    // a Ready Story's step is its build: `r` asks first, and `n` starts nothing
     for _ in 0..3 {
         f.app.handle_project_key(&key(KeyCode::Char(']')));
     }
     assert_eq!(view(&f.app).screen, Screen::Ready);
     f.app.handle_project_key(&key(KeyCode::Down));
     f.app.handle_project_key(&key(KeyCode::Char('r')));
+    let asked = render(&f.app);
+    assert!(asked.contains("Build Story #2"), "{asked}");
+    assert!(asked.contains("draft pull request"), "{asked}");
+    f.app.handle_project_key(&key(KeyCode::Char('n')));
     assert!(view(&f.app).modal.is_none());
+    // the next Story depends on that one, which is not merged: no build is offered
+    f.app.handle_project_key(&key(KeyCode::Down));
+    f.app.handle_project_key(&key(KeyCode::Char('r')));
+    assert!(view(&f.app).modal.is_none());
+    let said = std::fs::read_to_string(&started).unwrap();
+    assert_eq!(said.lines().count(), 1, "a build was started: {said}");
 }

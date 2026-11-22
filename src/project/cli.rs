@@ -35,12 +35,16 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
   agent-mux project advance [--yes]
         the board moves the pull requests already justify; without --yes, only the plan
 
-  agent-mux project run <n> [--step spec|plan|bug|critique|validate] [--harness H] [--critic H] [--dry-run] [--apply]
+  agent-mux project run <n> [--step spec|plan|bug|critique|validate|build|fix] [--harness H] [--critic H] [--dry-run] [--apply] [--ignore-dependencies]
         run the item's next document step: a read-only session writes the document,
         agent-mux publishes it by pull request and comments on the issue; a plan and
         a bug document are then audited by a second session; a decomposition is
         drafted the same way, and --apply creates its Stories and Tasks once you
         reviewed and merged the draft
+        on a Story that is Ready or a Bug that was triaged, it builds: a session
+        writes and commits the code in a worktree of the code repository, a second
+        one reviews the diff, and agent-mux pushes the branch, opens a draft pull
+        request and moves the board to Code Review. Nothing is merged
 
   every command: [--dir DIR] [--refresh] [--cached]
 
@@ -449,6 +453,25 @@ async fn run_flow(
     args: Value,
     model: Option<String>,
 ) -> Result<Value, String> {
+    let overrides = model
+        .map(|m| vec![("work".to_string(), "model".to_string(), m)])
+        .unwrap_or_default();
+    run_flow_in(flow, workspace, harness, args, overrides, None)
+        .await
+        .map(|(result, _)| result)
+}
+
+/// Runs a built-in flow headless and answers its result and the run's
+/// folder. `worktree_base` is the ref a `revise` step's worktree forks
+/// from.
+async fn run_flow_in(
+    flow: &str,
+    workspace: &Path,
+    harness: Harness,
+    args: Value,
+    step_overrides: Vec<(String, String, String)>,
+    worktree_base: Option<String>,
+) -> Result<(Value, PathBuf), String> {
     use crate::app::workflows::WorkflowRunRequest;
     let entries = crate::workflows::cli::entries();
     let entry = crate::workflows::library::find(&entries, flow)
@@ -468,13 +491,12 @@ async fn run_flow(
         usd_cap: None,
         isolation: None,
         resume_from: None,
-        worktree_base: None,
-        step_overrides: model
-            .map(|m| vec![("work".to_string(), "model".to_string(), m)])
-            .unwrap_or_default(),
+        worktree_base,
+        step_overrides,
     };
     let mut h = crate::workflows::cli::headless().map_err(|e| e.to_string())?;
     let run_id = h.app.start_workflow_run(req)?;
+    let run_dir = crate::workflows::context::run_dir(&h.app.workflows_runtime_dir(), &run_id);
     eprintln!("  {flow} on {} · run {run_id}", harness.as_str());
     let timeout = std::time::Duration::from_secs(h.app.workflows.run_timeout_s + 60);
     let finished =
@@ -489,7 +511,7 @@ async fn run_flow(
             .error
             .unwrap_or_else(|| format!("the run {run_id} ended {}", recent.status)));
     }
-    Ok(recent.result)
+    Ok((recent.result, run_dir))
 }
 
 /// The model a step runs with: the one spec-wave's file asks for, when
@@ -534,9 +556,18 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
         hub_root: hub_root.clone(),
     };
     println!("#{n} {}", item.title);
-    let mut planned = ctx
-        .plan(&item, &detail, forced)
-        .map_err(|x| anyhow::anyhow!(x))?;
+    // development is its own step: a Story, a triaged Bug, or `--step build`
+    let develop = match forced {
+        Some(f) => f == next::Action::Implement,
+        None => super::build::decision(&item, &s, false).is_some(),
+    };
+    let mut planned = if develop {
+        ctx.build_plan(&item, &detail, &s, a.flag("--ignore-dependencies"))
+    } else {
+        ctx.plan(&item, &detail, forced)
+    }
+    .map_err(|x| anyhow::anyhow!(x))?;
+    let mut failed: Option<String> = None;
     let mut touched: Vec<u64> = Vec::new();
     let mut published: Option<(&'static str, String)> = None;
     loop {
@@ -553,6 +584,67 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
             Planned::NotBuilt(action) => {
                 println!("  next: {}", action.as_str());
                 println!("  agent-mux does not run this step yet");
+                break;
+            }
+            Planned::Build(b) => {
+                let reviewer = "another harness when one is installed";
+                println!(
+                    "  next: {} #{n} with the flow {} on {}",
+                    if b.kind == super::build::BuildKind::Bug {
+                        "fix Bug"
+                    } else {
+                        "build Story"
+                    },
+                    b.flow,
+                    harness.as_str()
+                );
+                println!(
+                    "  where: {} ({}), a worktree forked from origin/{}",
+                    b.target.dir.display(),
+                    b.target.repo.slug(),
+                    b.base
+                );
+                for t in &b.tasks {
+                    println!(
+                        "    Task #{} {}",
+                        t.number,
+                        super::contract::strip_tag(&t.title)
+                    );
+                }
+                for line in &b.notes {
+                    println!("  {line}");
+                }
+                println!("  then: an independent review of the committed diff, on {reviewer}");
+                println!(
+                    "  then: push `{}`, open a draft pull request, move the board to Code Review",
+                    b.branch
+                );
+                if a.flag("--dry-run") {
+                    break;
+                }
+                // what can fail cheaply fails before the board says development
+                crate::factory::deliver::fetch(&b.target.dir, &b.base)
+                    .map_err(|x| anyhow::anyhow!(x))?;
+                let started = ctx.build_start(&b, &s);
+                finish_report(&started, &mut touched);
+                let ran = run_flow_in(
+                    b.flow,
+                    &b.target.dir,
+                    harness,
+                    b.args.clone(),
+                    Vec::new(),
+                    Some(format!("origin/{}", b.base)),
+                )
+                .await;
+                let done = ran.and_then(|(result, run_dir)| {
+                    let wt = crate::app::workflows::load_step_worktrees(&run_dir).remove("build");
+                    ctx.build_finish(&b, &result, wt.as_ref(), &s)
+                });
+                match done {
+                    Ok(r) => finish_report(&r, &mut touched),
+                    // the board already says development: the cache must too
+                    Err(e) => failed = Some(e),
+                }
                 break;
             }
             Planned::Apply => {
@@ -675,6 +767,9 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
             },
         );
         let _ = store::save(&e.conn, &cached);
+    }
+    if let Some(e) = failed {
+        anyhow::bail!("#{n}: {e}");
     }
     Ok(())
 }

@@ -1,6 +1,6 @@
 # Projects: every spec-wave flow, in agent-mux — design
 
-Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented (§19 to §22); nothing else is.
+Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, and the first part of phase 4 (§19 to §23); nothing else is.
 
 **The requirement.** Any repository configured with spec-wave must open in
 agent-mux as a **Project** and work there: every flow spec-wave has, each
@@ -1172,3 +1172,47 @@ Decomposition screen, `project run --apply`). Where the code differs from
   dependency map in one commit.
 - **Not built:** a Tech Leader's decisions on findings (`risk-accepted`),
   `engine = "actions"`, and `order --sync`.
+
+## 23. Phase 4, first part, as built
+
+Built on 2026-11-22: the `build` step of one Story and the `fix` step of
+one Bug (`src/project/build.rs`, `Ops::build_board`, the flows
+`project-story` and `project-bug-fix`, the skills `wf-project-build` and
+`wf-project-review`, `project run` on a Story or a triaged Bug), and the
+Development and Code review screens. Where the code differs from §7 and
+§12:
+
+- **No `work_items` row.** A build is planned, run and delivered by
+  `project run` in one process, as the document steps are; it reuses the
+  factory's `revise` shape, its verdict rule (`factory::settle`: an
+  approval with a failing or missing criterion delivers nothing) and its
+  push and pull request code, not its queue. The new columns of §7.1 are
+  not added.
+- **The board is written twice, not per Task.** One session builds every
+  Task of the Story, so Rust cannot see a Task start: the Tasks go to
+  Desenvolvimento when the run starts and to Done when it is delivered,
+  as spec-wave's `planBoardMoves` does for its own executor.
+- **The trailers are guaranteed by Rust.** The session is asked for
+  them; a branch without them gets one empty commit that carries them.
+- **The branch** is `story/<n>-<slug>` or `fix/<n>-<slug>`. spec-wave
+  names none for an operator's build (its executor chooses).
+- **A dependency is met when it is merged** (closed, or in QA or later),
+  not when it is in review: without the stack of §7.2 a build forks from
+  the default branch. `--ignore-dependencies` is the operator's override.
+- **An item with no `repo:` label is built in the hub**, as in spec-wave
+  (found against a real hub that holds code and lists other
+  repositories).
+- **The context is spec-wave's, shortened.** The board instructions a
+  session cannot follow (it never touches GitHub) are left out, and the
+  digest of recent code is not built: the session has the repository.
+- **The reviewer's harness** is the flow's `harness = "other"`; `--critic`
+  does not reach it.
+- **The Development screen is three groups**, not the fleet's kanban of
+  §8.1: in development, ready to build, waiting on a dependency. Code
+  review groups items by what their pull request waits on.
+- **Not built, the rest of phase 4:** a Feature as a stack and marking
+  its pull requests ready together (§7.2), a Story across repositories
+  (§7.3), a Task on its own, `project workspace|merge` (§7.5), `fix-pr`,
+  the fleet (§8), `metadata.project` on launches and what reads it
+  (§9.2, §9.3), chat, refine and estimate on an item, the `/project`
+  skill and the MCP tools.
