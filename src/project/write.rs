@@ -98,6 +98,8 @@ impl Board {
 pub struct Created {
     pub number: u64,
     pub node_id: String,
+    /// GitHub's database id, which the blocked-by relation asks for.
+    pub id: u64,
     pub url: String,
 }
 
@@ -107,6 +109,7 @@ pub fn create_issue(
     title: &str,
     body: &str,
     labels: &[String],
+    milestone: Option<u64>,
 ) -> Result<Created, String> {
     let what = "gh api (create issue)";
     let path = format!("repos/{}/issues", cfg.hub_repo().slug());
@@ -124,6 +127,10 @@ pub fn create_issue(
         args.push("-f".into());
         args.push(format!("labels[]={l}"));
     }
+    if let Some(m) = milestone {
+        args.push("-F".into());
+        args.push(format!("milestone={m}"));
+    }
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let v = json(&gh(tools, cfg.root(), &refs, what)?, what)?;
     Ok(Created {
@@ -131,6 +138,7 @@ pub fn create_issue(
             .get("number")
             .and_then(Value::as_u64)
             .ok_or_else(|| format!("{what}: no issue number in the answer"))?,
+        id: v.get("id").and_then(Value::as_u64).unwrap_or(0),
         node_id: v
             .get("node_id")
             .and_then(Value::as_str)
@@ -221,6 +229,53 @@ pub fn close(tools: &Tools, cfg: &ProjectConfig, number: u64, reason: &str) -> R
             &format!("state_reason={reason}"),
         ],
         "gh api (close issue)",
+    )
+    .map(|_| ())
+}
+
+/// GitHub's database id of an issue.
+pub fn issue_id(tools: &Tools, cfg: &ProjectConfig, number: u64) -> Result<u64, String> {
+    let what = "gh api (issue id)";
+    let out = gh(
+        tools,
+        cfg.root(),
+        &[
+            "api",
+            &format!("repos/{}/issues/{number}", cfg.hub_repo().slug()),
+            "--jq",
+            ".id",
+        ],
+        what,
+    )?;
+    out.trim()
+        .parse()
+        .map_err(|_| format!("{what}: #{number} answered no id"))
+}
+
+/// Records that `number` is blocked by the issue with database id
+/// `blocker_id`: GitHub's native dependency, which takes neither a number
+/// nor a node id.
+pub fn add_blocked_by(
+    tools: &Tools,
+    cfg: &ProjectConfig,
+    number: u64,
+    blocker_id: u64,
+) -> Result<(), String> {
+    gh(
+        tools,
+        cfg.root(),
+        &[
+            "api",
+            "-X",
+            "POST",
+            &format!(
+                "repos/{}/issues/{number}/dependencies/blocked_by",
+                cfg.hub_repo().slug()
+            ),
+            "-F",
+            &format!("issue_id={blocker_id}"),
+        ],
+        "gh api (blocked by)",
     )
     .map(|_| ())
 }

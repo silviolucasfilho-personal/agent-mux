@@ -15,10 +15,12 @@
 //! - [`store`]: the cache in the trace store (schema v30).
 //! - [`doctor`], [`cli`]: `agent-mux project …`.
 
+pub mod apply;
 pub mod cli;
 pub mod config;
 pub mod contract;
 pub mod critique;
+pub mod decomposition;
 pub mod deliver;
 pub mod docs;
 pub mod doctor;

@@ -314,6 +314,7 @@ pub fn doc_path(t: ItemType, title: &str, doc: &str) -> String {
 pub fn artifact_branch(number: u64, doc: &str) -> String {
     let suffix = match doc {
         "decomposition" => "decompose",
+        "decomposition-apply" => "decompose-apply",
         other => other,
     };
     format!("spec-wave/{number}-{suffix}")

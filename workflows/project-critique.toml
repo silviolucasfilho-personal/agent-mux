@@ -9,7 +9,7 @@ output = "work"
 default_isolation = "none"
 
 [args.kind]
-description = "What is audited: plan, spec or bug."
+description = "What is audited: plan, spec, bug or stories."
 required = true
 [args.document]
 description = "The document, as it is."
@@ -19,6 +19,9 @@ description = "The issue it comes from."
 required = true
 [args.spec]
 description = "The spec.md, when the plan is audited."
+default = ""
+[args.plan]
+description = "The plan.md, when the decomposition is audited."
 default = ""
 [args.tech_context]
 description = "The text of .github/config/tech_context.yml."
@@ -43,5 +46,5 @@ phase = "Work"
 agent = "critic"
 skill = "wf-project-critique"
 isolation = "none"
-args = { kind = "{args.kind}", document = "{args.document}", issue = "{args.issue}", spec = "{args.spec}", tech_context = "{args.tech_context}", tech_override = "{args.tech_override}", workspace = "{args.workspace}" }
+args = { kind = "{args.kind}", document = "{args.document}", issue = "{args.issue}", spec = "{args.spec}", plan = "{args.plan}", tech_context = "{args.tech_context}", tech_override = "{args.tech_override}", workspace = "{args.workspace}" }
 result = "findings"

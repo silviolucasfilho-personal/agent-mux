@@ -233,6 +233,7 @@ fn a_spec_wave_repository_opens_reads_and_draws() {
     // Ready: the Stories in execution order
     f.app.handle_project_key(&key(KeyCode::Char(']')));
     f.app.handle_project_key(&key(KeyCode::Char(']')));
+    f.app.handle_project_key(&key(KeyCode::Char(']')));
     assert_eq!(view(&f.app).screen, Screen::Ready);
     let ready = render(&f.app);
     assert!(
@@ -423,7 +424,7 @@ fn what_waits_on_the_operator_is_in_the_inbox_and_opens_its_item() {
     f.app.open_project();
     wait(&mut f.app, "the read", |a| view(a).snap.is_some());
     // the Bugs screen lists the Bug that waits for its triage
-    for _ in 0..6 {
+    for _ in 0..7 {
         f.app.handle_project_key(&key(KeyCode::Char(']')));
     }
     assert_eq!(view(&f.app).screen, Screen::Bugs);
@@ -501,7 +502,7 @@ fn the_next_step_is_confirmed_then_started_as_its_own_process() {
     );
 
     // a Story has no document step: `r` says what it waits on instead
-    for _ in 0..2 {
+    for _ in 0..3 {
         f.app.handle_project_key(&key(KeyCode::Char(']')));
     }
     assert_eq!(view(&f.app).screen, Screen::Ready);

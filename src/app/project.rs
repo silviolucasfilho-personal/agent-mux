@@ -34,6 +34,7 @@ pub enum Screen {
     Backlog,
     Spec,
     Review,
+    Decompose,
     Ready,
     Bugs,
     Uat,
@@ -42,12 +43,13 @@ pub enum Screen {
 }
 
 impl Screen {
-    pub const ALL: [Screen; 10] = [
+    pub const ALL: [Screen; 11] = [
         Screen::Home,
         Screen::Board,
         Screen::Backlog,
         Screen::Spec,
         Screen::Review,
+        Screen::Decompose,
         Screen::Ready,
         Screen::Bugs,
         Screen::Uat,
@@ -62,6 +64,7 @@ impl Screen {
             Screen::Backlog => "Backlog",
             Screen::Spec => "Specification",
             Screen::Review => "Technical review",
+            Screen::Decompose => "Decomposition",
             Screen::Ready => "Ready",
             Screen::Bugs => "Bugs",
             Screen::Uat => "UAT and release",
@@ -165,7 +168,7 @@ pub struct ProjectView {
     pub focus: Focus,
     pub rows: Vec<Row>,
     /// The list cursor of each screen.
-    pub cursors: [usize; 10],
+    pub cursors: [usize; 11],
     pub tab: usize,
     pub scroll: u16,
     pub filter: String,
@@ -204,7 +207,7 @@ impl ProjectView {
             screen: Screen::Home,
             focus: Focus::List,
             rows: Vec::new(),
-            cursors: [0; 10],
+            cursors: [0; 11],
             tab: 0,
             scroll: 0,
             filter: String::new(),
@@ -294,6 +297,7 @@ impl ProjectView {
             Screen::Backlog => backlog_features(s).len(),
             Screen::Spec => spec_groups(s).iter().map(|(_, _, v)| v.len()).sum(),
             Screen::Review => review_groups(s).iter().map(|(_, _, v)| v.len()).sum(),
+            Screen::Decompose => decompose_groups(s).iter().map(|(_, _, v)| v.len()).sum(),
             Screen::Ready => s
                 .items
                 .iter()
@@ -659,6 +663,8 @@ pub enum Op {
     /// Run the item's next document step, as `agent-mux project run`.
     RunStep {
         number: u64,
+        /// Create the issues of the reviewed draft: the operator's approval.
+        apply: bool,
     },
 }
 
@@ -674,7 +680,7 @@ impl Op {
             Op::Repair { number, .. } => format!("repairing the stage of #{number}"),
             Op::Triage { number, .. } => format!("triaging #{number}"),
             Op::Advance(m) => format!("making {} board move(s)", m.len()),
-            Op::RunStep { number } => format!("starting the next step of #{number}"),
+            Op::RunStep { number, .. } => format!("starting the next step of #{number}"),
         }
     }
 }
@@ -793,7 +799,12 @@ impl ProjectView {
                 use next::Action::*;
                 let runs = matches!(
                     d.action,
-                    GenerateSpec | GeneratePlan | GenerateBug | Validate
+                    GenerateSpec
+                        | GeneratePlan
+                        | GenerateBug
+                        | Validate
+                        | Decompose
+                        | DecomposeApply
                 ) && d.blocked.is_none();
                 if !runs {
                     let said = cli::decision_lines(&next::describe(&it, snap)).join(" · ");
@@ -803,6 +814,16 @@ impl ProjectView {
                 if d.action == Validate {
                     lines.push("It checks the merged documents and, if they pass, adds the approval label.".into());
                     lines.push("It comments on the issue either way.".into());
+                } else if d.action == DecomposeApply {
+                    lines.push("It creates the Story and Task issues of the reviewed draft, in Ready, linked and labelled.".into());
+                    lines.push(
+                        "Applying is your approval of the draft: it cannot be applied twice."
+                            .into(),
+                    );
+                } else if d.action == Decompose {
+                    lines.push("A read-only session on Claude Code drafts the Stories and Tasks, or the merged draft is audited as it is.".into());
+                    lines.push("agent-mux publishes the draft as decomposition.md on a pull request. No issue is created.".into());
+                    lines.push("A second session audits it; a grave finding adds `spec-wave:critique-failed`.".into());
                 } else {
                     lines.push("A read-only session on Claude Code writes the document.".into());
                     lines.push(
@@ -815,7 +836,10 @@ impl ProjectView {
                 }
                 self.modal = Some(Modal::Confirm {
                     lines,
-                    op: Op::RunStep { number: it.number },
+                    op: Op::RunStep {
+                        number: it.number,
+                        apply: d.action == DecomposeApply,
+                    },
                 });
             }
             'n' => {
@@ -1555,6 +1579,11 @@ pub fn rows_for(
                 group(&mut rows, key.into(), text.into(), items, 0);
             }
         }
+        Screen::Decompose => {
+            for (key, text, items) in decompose_groups(s) {
+                group(&mut rows, key.into(), text.into(), items, 0);
+            }
+        }
         Screen::Bugs => {
             // triage first, then the flow's order
             let stages: Vec<&str> = track(ItemType::Bug).unwrap_or_default();
@@ -1692,6 +1721,61 @@ pub fn review_groups(s: &Snapshot) -> Groups<'_> {
             "plan merged: validate to approve",
             validate,
         ),
+    ]
+}
+
+/// Decomposition: approved Features and RFCs on their way to Stories and
+/// Tasks, by where their draft is.
+pub fn decompose_groups(s: &Snapshot) -> Groups<'_> {
+    use crate::project::DocState::*;
+    let mut items: Vec<&Item> = s
+        .items
+        .iter()
+        .filter(|i| {
+            i.open
+                && !i.has_label(LABEL_DECOMPOSED)
+                && match i.item_type {
+                    Some(ItemType::Feature) => i.has_label(LABEL_PLAN_APPROVED),
+                    Some(ItemType::Rfc) => true,
+                    _ => false,
+                }
+        })
+        .collect();
+    items.sort_by(by_priority);
+    let (mut draft, mut review, mut failed, mut audit, mut apply) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for i in items {
+        let doc = i.doc_state("decomposition");
+        if i.has_label(LABEL_CRITIQUE_FAILED) || i.has_label(LABEL_NEEDS_HUMAN) {
+            failed.push(i);
+        } else if matches!(doc, Pr | Branch) {
+            review.push(i);
+        } else if doc == Base && i.has_label(LABEL_DECOMPOSE_READY) {
+            apply.push(i);
+        } else if doc == Base {
+            audit.push(i);
+        } else {
+            draft.push(i);
+        }
+    }
+    vec![
+        (
+            "decompose:apply",
+            "draft reviewed: apply to create the issues",
+            apply,
+        ),
+        (
+            "decompose:review",
+            "draft in review (merge its pull request)",
+            review,
+        ),
+        (
+            "decompose:failed",
+            "the critique failed: correct the draft",
+            failed,
+        ),
+        ("decompose:audit", "draft merged: audit it", audit),
+        ("decompose:draft", "to draft", draft),
     ]
 }
 
@@ -1927,15 +2011,18 @@ impl App {
             return;
         };
         let Some(cfg) = view.cfg.clone() else { return };
-        if let Op::RunStep { number } = &op {
+        if let Op::RunStep { number, apply } = &op {
             // a step takes minutes and runs a harness: it is a process of
             // its own, as the factory's are, and the runs view follows it
-            let args = vec![
+            let mut args = vec![
                 "run".to_string(),
                 number.to_string(),
                 "--dir".to_string(),
                 cfg.root().to_string_lossy().into_owned(),
             ];
+            if *apply {
+                args.push("--apply".to_string());
+            }
             let name = format!("project-run-{number}-{}", crate::project::now_ns());
             self.notice = Some(match self.start_project_process(&name, &args) {
                 Ok(log) => Notice::info(format!(
@@ -2454,5 +2541,66 @@ mod tests {
             v.handle_key(&key(KeyCode::Char('A'))),
             Outcome::Notice(_)
         ));
+    }
+    #[test]
+    fn the_decomposition_screen_follows_the_draft() {
+        use crate::project::{Doc, DocState};
+        let mut s = snapshot::build(&fixture::raw(), &fixture::cfg(), 1);
+        let doc = |state| Doc {
+            state,
+            path: String::new(),
+            pr: None,
+            branch: None,
+        };
+        let names = |s: &Snapshot| -> Vec<(&'static str, Vec<u64>)> {
+            decompose_groups(s)
+                .into_iter()
+                .filter(|(_, _, v)| !v.is_empty())
+                .map(|(k, _, v)| (k, v.iter().map(|i| i.number).collect()))
+                .collect()
+        };
+        // the fixture's Feature is approved and its draft is on a branch
+        assert_eq!(names(&s), vec![("decompose:review", vec![1])]);
+        s.items[0]
+            .docs
+            .insert("decomposition".into(), doc(DocState::Missing));
+        assert_eq!(names(&s), vec![("decompose:draft", vec![1])]);
+        s.items[0]
+            .docs
+            .insert("decomposition".into(), doc(DocState::Base));
+        assert_eq!(names(&s), vec![("decompose:audit", vec![1])]);
+        s.items[0].labels.push(LABEL_DECOMPOSE_READY.to_string());
+        assert_eq!(names(&s), vec![("decompose:apply", vec![1])]);
+        s.items[0].labels.push(LABEL_CRITIQUE_FAILED.to_string());
+        assert_eq!(names(&s), vec![("decompose:failed", vec![1])]);
+        // once applied it is no longer here
+        s.items[0].labels.push(LABEL_DECOMPOSED.to_string());
+        assert!(names(&s).is_empty());
+
+        // `r` on a reviewed draft asks before it creates anything
+        let mut v = view();
+        let it = &mut v.snap.as_mut().unwrap().items[0];
+        it.labels.push(LABEL_DECOMPOSE_READY.to_string());
+        for d in ["spec", "plan", "decomposition"] {
+            it.docs.insert(d.into(), doc(DocState::Base));
+        }
+        on_item(&mut v, Screen::Decompose, 1);
+        v.handle_key(&key(KeyCode::Char('r')));
+        let Some(Modal::Confirm { lines, op }) = &v.modal else {
+            panic!("{:?}", v.modal)
+        };
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("your approval of the draft")),
+            "{lines:?}"
+        );
+        assert_eq!(
+            op,
+            &Op::RunStep {
+                number: 1,
+                apply: true
+            }
+        );
     }
 }

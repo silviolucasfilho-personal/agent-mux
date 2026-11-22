@@ -43,6 +43,7 @@ pub fn doc_label(doc: &str) -> &'static str {
         "plan" => "plano técnico",
         "bug" => "documento de bug",
         "decomposition" => "rascunho de decomposição",
+        "decomposition-apply" => "registro das issues criadas",
         "qa-plan" => "plano de QA",
         _ => "documento",
     }
@@ -58,8 +59,13 @@ pub fn pr_title(doc: &str, number: u64, issue_title: &str) -> String {
     format!("docs(spec-wave): {} de {target}", doc_label(doc))
 }
 
-pub fn commit_message(number: u64, path: &str) -> String {
-    format!("docs: gera {path} (issue {number}) [spec-wave]\n")
+pub fn commit_message(doc: &str, number: u64, path: &str) -> String {
+    let action = if doc == "decomposition-apply" {
+        "registra as issues criadas em"
+    } else {
+        "gera"
+    };
+    format!("docs: {action} {path} (issue {number}) [spec-wave]\n")
 }
 
 /// The pull request's description. The issue is named by its URL, with
@@ -117,6 +123,8 @@ pub struct Artifact<'a> {
     pub content: &'a str,
     /// The step that reads this document next, for the description.
     pub next_step: Option<&'a str>,
+    /// Other files of the same commit: `(path, content)`.
+    pub extra: &'a [(String, String)],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,7 +214,20 @@ pub fn publish(
         }
         std::fs::write(&file, artifact.content).map_err(|e| format!("{}: {e}", file.display()))?;
         git(&wt, &["add", "--", artifact.path])?;
-        if git(&wt, &["status", "--porcelain", "--", artifact.path])?.is_empty() {
+        for (path, content) in artifact.extra {
+            if path.starts_with('/') || path.split('/').any(|p| p == "..") {
+                return Err(format!(
+                    "not published: {path:?} is not a path inside the repository"
+                ));
+            }
+            let extra = wt.join(path);
+            if let Some(dir) = extra.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            }
+            std::fs::write(&extra, content).map_err(|e| format!("{}: {e}", extra.display()))?;
+            git(&wt, &["add", "--", path])?;
+        }
+        if git(&wt, &["status", "--porcelain"])?.is_empty() {
             return Err(format!(
                 "not published: {} on {base} already has exactly this content",
                 artifact.path
@@ -219,9 +240,7 @@ pub fn publish(
                 "core.hooksPath=/dev/null",
                 "commit",
                 "-m",
-                &commit_message(artifact.number, artifact.path),
-                "--",
-                artifact.path,
+                &commit_message(artifact.doc, artifact.number, artifact.path),
             ],
         )?;
         git(
@@ -373,6 +392,7 @@ pub(crate) mod tests {
             path: "docs/features/pedidos/spec.md",
             content,
             next_step: Some("spec-wave:plan"),
+            extra: &[],
         }
     }
 
@@ -387,7 +407,7 @@ pub(crate) mod tests {
             "docs(spec-wave): plano técnico de issue 42"
         );
         assert_eq!(
-            commit_message(42, "docs/features/pedidos/spec.md"),
+            commit_message("spec", 42, "docs/features/pedidos/spec.md"),
             "docs: gera docs/features/pedidos/spec.md (issue 42) [spec-wave]\n"
         );
         let body = pr_body(
