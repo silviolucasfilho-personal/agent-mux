@@ -44,6 +44,9 @@ const PLAN_JSON: &str = r##"{"document":"# Estratégia Técnica\n# Detalhamento 
 const FINDINGS_JSON: &str =
     r#"{"findings":[{"severity":"menor","anchor":"Backend","text":"ordem das seções"}]}"#;
 
+const WORK_JSON: &str = r#"{"base":"origin/main","change_summary":[{"path":"pedidos.rs","change":"lista os pedidos"}],"verification":[{"command":"cargo test","result":"pass"}],"deviations":[],"known_limitations":[]}"#;
+const APPROVE_JSON: &str = r#"{"verdict":"approve","criteria_results":[{"criterion":"lista paginada","pass":true,"evidence":"pedidos.rs:1"}],"blocking_findings":[],"suggestions":[],"summary":"faz o que a Story pede"}"#;
+
 /// A fake `claude`: it records the context it was given and answers a
 /// plan, or findings when the context asks for a critique. It also tries
 /// to write a file, which a read-only step must not need.
@@ -61,6 +64,20 @@ emit() {{
   esc=$(printf '```workflow-result\n%s\n```' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk 'BEGIN{{ORS="\\n"}} {{print}}' | sed 's/\\n$//')
   printf '{{"type":"result","result":"%s","total_cost_usd":0.01,"usage":{{"input_tokens":10,"output_tokens":5}}}}\n' "$esc"
 }}
+case "$AGENT_MUX_WORKFLOW_STEP" in
+  build)
+    pwd > "$r/build.cwd"
+    cp "$AGENT_MUX_WORKFLOW_CONTEXT" "$r/build.ctx.json"
+    printf 'fn pedidos() {{}}\n' > pedidos.rs
+    git add -A >/dev/null 2>&1
+    git commit -q -m 'feat: pedidos' >/dev/null 2>&1
+    emit '{work}'
+    exit 0 ;;
+  build/review)
+    pwd > "$r/review.cwd"
+    emit '{approve}'
+    exit 0 ;;
+esac
 if grep -q '"findings"' "$AGENT_MUX_WORKFLOW_CONTEXT"; then
   emit '{findings}'
 else
@@ -71,6 +88,8 @@ exit 0
         record = record.display(),
         findings = FINDINGS_JSON,
         plan = PLAN_JSON,
+        work = WORK_JSON,
+        approve = APPROVE_JSON,
     );
     let path = bin.join("claude");
     std::fs::write(&path, script).unwrap();
@@ -169,6 +188,17 @@ fn fixture() -> Fixture {
 
 /// Runs one built-in flow to its end and answers its result.
 async fn run_flow(f: &mut Fixture, flow: &str, args: Value) -> Value {
+    run_flow_from(f, flow, args, None).await.0
+}
+
+/// `run_flow`, with the ref a `revise` step's worktree forks from; also
+/// answers the run's id.
+async fn run_flow_from(
+    f: &mut Fixture,
+    flow: &str,
+    args: Value,
+    worktree_base: Option<String>,
+) -> (Value, String) {
     let req = WorkflowRunRequest {
         name: flow.into(),
         source: "test".into(),
@@ -181,7 +211,7 @@ async fn run_flow(f: &mut Fixture, flow: &str, args: Value) -> Value {
         usd_cap: None,
         isolation: None,
         resume_from: None,
-        worktree_base: None,
+        worktree_base,
         step_overrides: Vec::new(),
     };
     f.app
@@ -212,7 +242,7 @@ async fn run_flow(f: &mut Fixture, flow: &str, args: Value) -> Value {
         "{flow}: {:?} {:?}",
         recent.error, recent.notes
     );
-    recent.result
+    (recent.result, recent.run_id)
 }
 
 fn feature() -> Item {
@@ -359,6 +389,177 @@ async fn a_plan_is_written_published_and_audited() {
     assert!(calls[2].contains("### ⚠️ Menores"));
     // a clean audit applies no label
     assert_eq!(calls.len(), 3, "{calls:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_story_is_built_reviewed_and_delivered_as_a_draft() {
+    use agent_mux::project::build;
+    let mut f = fixture();
+    let cfg = agent_mux::project::config::load(&f.hub).unwrap();
+    let mut story = feature();
+    story.number = 12;
+    story.node_id = "I_12".into();
+    story.title = "[STORY] Ver pedidos".into();
+    story.item_type = Some(ItemType::Story);
+    story.labels = vec!["[STORY]".into()];
+    story.docs.clear();
+    story.stage = Some("✅ Ready".into());
+    let snap = agent_mux::project::Snapshot {
+        hub: "acme/hub".into(),
+        items: vec![story.clone()],
+        ..Default::default()
+    };
+    let detail = Detail {
+        title: story.title.clone(),
+        body: "Como cliente quero ver meus pedidos\n\n## Critérios de aceite\n\n- lista paginada"
+            .into(),
+        url: "https://github.com/acme/hub/issues/12".into(),
+        comments: vec![],
+    };
+    // the checkout must be of the repository it is delivered to: the
+    // remote's path names acme/hub, as its URL would
+    let origin = f.root.join("acme").join("hub.git");
+    std::fs::create_dir_all(origin.parent().unwrap()).unwrap();
+    git(
+        &f.root,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            "origin.git",
+            origin.to_str().unwrap(),
+        ],
+    );
+    git(
+        &f.hub,
+        &["remote", "set-url", "origin", origin.to_str().unwrap()],
+    );
+    git(&f.hub, &["fetch", "-q", "origin"]);
+    let main_before = git(&origin, &["rev-parse", "main"]);
+
+    // 1. the plan: a Project with no code repository builds in the hub
+    let b = {
+        let ctx = Ctx {
+            tools: &f.tools,
+            cfg: &cfg,
+            hub_root: f.hub.clone(),
+            scratch: f.root.join("scratch"),
+        };
+        let Planned::Build(b) = ctx.build_plan(&story, &detail, &snap, false).unwrap() else {
+            panic!("the Story's step is not a build")
+        };
+        b
+    };
+    assert_eq!(
+        (b.flow, b.base.as_str(), b.branch.as_str()),
+        (build::FLOW_STORY, "main", "story/12-ver-pedidos")
+    );
+    assert_eq!(b.criteria[0], "lista paginada");
+    assert!(
+        std::fs::read_to_string(f.root.join("gh-calls")).is_err(),
+        "planning wrote to GitHub"
+    );
+
+    // 2. the sessions: the implementer commits in a worktree, the reviewer reads it there
+    let (result, run_id) =
+        run_flow_from(&mut f, b.flow, b.args.clone(), Some("origin/main".into())).await;
+    assert_eq!(result["outcome"], "approved", "{result}");
+    let calls = f.bin.join("calls");
+    let cwd = std::fs::read_to_string(calls.join("build.cwd")).unwrap();
+    assert_ne!(
+        cwd.trim(),
+        f.hub.to_string_lossy(),
+        "the session worked in the operator's checkout"
+    );
+    assert_eq!(
+        std::fs::read_to_string(calls.join("review.cwd")).unwrap(),
+        cwd
+    );
+    let given = std::fs::read_to_string(calls.join("build.ctx.json")).unwrap();
+    assert!(
+        given.contains("Contexto de implementação — Story #12"),
+        "the context was not passed"
+    );
+    assert!(given.contains("Spec-Wave-Story: #12"));
+    assert_eq!(
+        git(&f.hub, &["status", "--porcelain", "--untracked-files=no"]),
+        ""
+    );
+
+    // 3. the delivery: one branch, a draft pull request, a note on the issue
+    let run_dir = agent_mux::workflows::context::run_dir(&f.app.workflows_runtime_dir(), &run_id);
+    let wt = agent_mux::app::workflows::load_step_worktrees(&run_dir)
+        .remove("build")
+        .expect("the build step left no worktree");
+    let ctx = Ctx {
+        tools: &f.tools,
+        cfg: &cfg,
+        hub_root: f.hub.clone(),
+        scratch: f.root.join("scratch"),
+    };
+    let report = ctx.build_finish(&b, &result, Some(&wt), &snap).unwrap();
+    assert!(
+        report
+            .lines
+            .iter()
+            .any(|l| l.contains("opened the draft pull request")),
+        "{report:?}"
+    );
+    assert_eq!(
+        git(&origin, &["show", "story/12-ver-pedidos:pedidos.rs"]),
+        "fn pedidos() {}"
+    );
+    // the trail was added by agent-mux, since the session's commit had none
+    assert!(
+        git(
+            &origin,
+            &["log", "-1", "--format=%B", "story/12-ver-pedidos"]
+        )
+        .contains("Spec-Wave-Story: #12")
+    );
+    assert_eq!(
+        git(&origin, &["rev-parse", "main"]),
+        main_before,
+        "the default branch moved"
+    );
+    let calls = std::fs::read_to_string(f.root.join("gh-calls")).unwrap();
+    let pr = calls.lines().find(|l| l.starts_with("pr create")).unwrap();
+    assert!(
+        pr.starts_with(
+            "pr create --draft --base main --head story/12-ver-pedidos --title Ver pedidos"
+        ),
+        "{pr}"
+    );
+    assert!(
+        pr.contains("Closes acme/hub#12") && pr.contains("| lista paginada | ✅ |"),
+        "{pr}"
+    );
+    assert!(
+        calls
+            .lines()
+            .any(|l| l
+                .starts_with("issue comment 12 -R acme/hub --body 🚧 **Implementação entregue**")),
+        "{calls}"
+    );
+    assert!(
+        !calls.contains("pr merge") && !calls.contains("pr ready"),
+        "{calls}"
+    );
+}
+
+#[test]
+fn the_build_flows_review_in_a_worktree() {
+    use agent_mux::project::build;
+    for flow in [build::FLOW_STORY, build::FLOW_BUG_FIX] {
+        let text = library::builtin(flow).unwrap_or_else(|| panic!("{flow} is not built in"));
+        assert!(
+            text.contains("kind = \"revise\"") && text.contains("default_isolation = \"worktree\"")
+        );
+        assert!(
+            text.contains("harness = \"other\""),
+            "{flow}: the review is independent"
+        );
+    }
 }
 
 #[test]

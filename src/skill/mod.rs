@@ -150,6 +150,8 @@ pub fn builtin_packages() -> Vec<BuiltinPackage> {
         wf_skill!("wf-project-bug"),
         wf_skill!("wf-project-critique"),
         wf_skill!("wf-project-decompose"),
+        wf_skill!("wf-project-build"),
+        wf_skill!("wf-project-review"),
     ]
 }
 

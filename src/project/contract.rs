@@ -522,6 +522,18 @@ pub fn comment_stage_repair(
 }
 
 /// The board's `Area` options.
+/// The `git trailer` keys spec-wave reads from a commit to tell which
+/// Story and Tasks it carries (`lib/commit-trailers.mjs`).
+pub const TRAILER_STORY: &str = "Spec-Wave-Story";
+pub const TRAILER_TASKS: &str = "Spec-Wave-Tasks";
+pub const TRAILER_AGENT: &str = "Spec-Wave-Agent";
+
+/// The reference a pull request closes its hub issue with, qualified by
+/// the hub: `#12` in a code repository would name that repository's issue.
+pub fn closes_ref(hub: &str, number: u64) -> String {
+    format!("{hub}#{number}")
+}
+
 pub const AREAS: [&str; 6] = ["Frontend", "Backend", "Mobile", "Infra", "DevOps", "Data"];
 pub const FIELD_AREA: &str = "Area";
 

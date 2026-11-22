@@ -20,7 +20,7 @@ use crate::project::config::{self, ProjectConfig, Role};
 use crate::project::contract::*;
 use crate::project::doctor::{self, Check};
 use crate::project::next::{self, Decision};
-use crate::project::{Item, ItemType, Snapshot, cli, ops, order, snapshot, stage, store};
+use crate::project::{Item, ItemType, Snapshot, build, cli, ops, order, snapshot, stage, store};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -36,6 +36,8 @@ pub enum Screen {
     Review,
     Decompose,
     Ready,
+    Development,
+    CodeReview,
     Bugs,
     Uat,
     Milestones,
@@ -43,7 +45,7 @@ pub enum Screen {
 }
 
 impl Screen {
-    pub const ALL: [Screen; 11] = [
+    pub const ALL: [Screen; 13] = [
         Screen::Home,
         Screen::Board,
         Screen::Backlog,
@@ -51,6 +53,8 @@ impl Screen {
         Screen::Review,
         Screen::Decompose,
         Screen::Ready,
+        Screen::Development,
+        Screen::CodeReview,
         Screen::Bugs,
         Screen::Uat,
         Screen::Milestones,
@@ -66,6 +70,8 @@ impl Screen {
             Screen::Review => "Technical review",
             Screen::Decompose => "Decomposition",
             Screen::Ready => "Ready",
+            Screen::Development => "Development",
+            Screen::CodeReview => "Code review",
             Screen::Bugs => "Bugs",
             Screen::Uat => "UAT and release",
             Screen::Milestones => "Milestones",
@@ -168,7 +174,7 @@ pub struct ProjectView {
     pub focus: Focus,
     pub rows: Vec<Row>,
     /// The list cursor of each screen.
-    pub cursors: [usize; 11],
+    pub cursors: [usize; Screen::ALL.len()],
     pub tab: usize,
     pub scroll: u16,
     pub filter: String,
@@ -207,7 +213,7 @@ impl ProjectView {
             screen: Screen::Home,
             focus: Focus::List,
             rows: Vec::new(),
-            cursors: [0; 11],
+            cursors: [0; Screen::ALL.len()],
             tab: 0,
             scroll: 0,
             filter: String::new(),
@@ -298,6 +304,8 @@ impl ProjectView {
             Screen::Spec => spec_groups(s).iter().map(|(_, _, v)| v.len()).sum(),
             Screen::Review => review_groups(s).iter().map(|(_, _, v)| v.len()).sum(),
             Screen::Decompose => decompose_groups(s).iter().map(|(_, _, v)| v.len()).sum(),
+            Screen::Development => development_groups(s).iter().map(|(_, _, v)| v.len()).sum(),
+            Screen::CodeReview => code_review_groups(s).iter().map(|(_, _, v)| v.len()).sum(),
             Screen::Ready => s
                 .items
                 .iter()
@@ -794,6 +802,32 @@ impl ProjectView {
                 let Some(snap) = &self.snap else {
                     return Some(Outcome::None);
                 };
+                // development: a Story, or a Bug past its triage
+                if let Some(d) = build::decision(&it, snap, false) {
+                    let line = cli::decision_lines(&d).join(" · ");
+                    if !d.runnable() {
+                        return Some(Outcome::Notice(format!("#{}: {line}", it.number)));
+                    }
+                    let bug = it.item_type == Some(ItemType::Bug);
+                    self.modal = Some(Modal::Confirm {
+                        lines: vec![
+                            format!(
+                                "{} #{}: {line}",
+                                if bug { "Fix Bug" } else { "Build Story" },
+                                it.number
+                            ),
+                            "A session on Claude Code writes the code in a worktree of the code repository, forked from its default branch, and commits it.".into(),
+                            "A second session reviews the committed diff; the work goes back to the first at most twice.".into(),
+                            "If the review approves, agent-mux pushes the branch, opens a draft pull request and moves the board to Code Review.".into(),
+                            "The board moves to Desenvolvimento as soon as it starts. It takes minutes; nothing is merged.".into(),
+                        ],
+                        op: Op::RunStep {
+                            number: it.number,
+                            apply: false,
+                        },
+                    });
+                    return Some(Outcome::None);
+                }
                 let d = next::next_step(&it);
                 let line = cli::decision_lines(&d).join(" · ");
                 use next::Action::*;
@@ -1584,6 +1618,16 @@ pub fn rows_for(
                 group(&mut rows, key.into(), text.into(), items, 0);
             }
         }
+        Screen::Development => {
+            for (key, text, items) in development_groups(s) {
+                group(&mut rows, key.into(), text.into(), items, 0);
+            }
+        }
+        Screen::CodeReview => {
+            for (key, text, items) in code_review_groups(s) {
+                group(&mut rows, key.into(), text.into(), items, 0);
+            }
+        }
         Screen::Bugs => {
             // triage first, then the flow's order
             let stages: Vec<&str> = track(ItemType::Bug).unwrap_or_default();
@@ -1720,6 +1764,98 @@ pub fn review_groups(s: &Snapshot) -> Groups<'_> {
             "review:validate",
             "plan merged: validate to approve",
             validate,
+        ),
+    ]
+}
+
+/// Development: the Stories and Bugs whose code is to be written, by what
+/// a build of each would meet. An item with an open pull request is the
+/// Code review screen's.
+pub fn development_groups(s: &Snapshot) -> Groups<'_> {
+    let mut items: Vec<&Item> = s
+        .items
+        .iter()
+        .filter(|i| i.open && matches!(i.item_type, Some(ItemType::Story | ItemType::Bug)))
+        .collect();
+    items.sort_by(by_priority);
+    let (mut going, mut ready, mut waiting) = (Vec::new(), Vec::new(), Vec::new());
+    for i in items {
+        let Some(d) = build::decision(i, s, false) else {
+            continue;
+        };
+        let code = d.blocked.as_ref().map(|b| b.code);
+        if d.action != next::Action::Implement || code == Some("pr-pending") {
+            continue;
+        }
+        if code == Some("dependency-pending") {
+            waiting.push(i);
+        } else if stage::shown(i).stage == STAGE_DEVELOPMENT {
+            going.push(i);
+        } else if d.runnable() {
+            ready.push(i);
+        }
+    }
+    vec![
+        (
+            "development:going",
+            "in development (r builds again from the default branch)",
+            going,
+        ),
+        ("development:ready", "ready to build", ready),
+        (
+            "development:waiting",
+            "waiting on a dependency that is not merged",
+            waiting,
+        ),
+    ]
+}
+
+/// Code review: every item with an open pull request for its code, by
+/// what the pull request waits on, and the items the board says are in
+/// review with none.
+pub fn code_review_groups(s: &Snapshot) -> Groups<'_> {
+    let mut items: Vec<&Item> = s
+        .items
+        .iter()
+        .filter(|i| {
+            i.open
+                && i.item_type.is_some()
+                && (i.pulls.iter().any(|p| p.open()) || stage::shown(i).stage == STAGE_CODE_REVIEW)
+        })
+        .collect();
+    items.sort_by(by_priority);
+    let (mut changes, mut approved, mut waiting, mut draft, mut none) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for i in items {
+        let open: Vec<&crate::project::Pull> = i.pulls.iter().filter(|p| p.open()).collect();
+        if open.is_empty() {
+            // a Feature follows its Stories: it has no pull request of its own
+            if !matches!(i.item_type, Some(ItemType::Feature | ItemType::Rfc)) {
+                none.push(i);
+            }
+        } else if open.iter().any(|p| p.review == "CHANGES_REQUESTED") {
+            changes.push(i);
+        } else if open.iter().all(|p| p.draft) {
+            draft.push(i);
+        } else if open.iter().all(|p| p.review == "APPROVED") {
+            approved.push(i);
+        } else {
+            waiting.push(i);
+        }
+    }
+    vec![
+        ("review:changes", "changes requested", changes),
+        ("review:approved", "approved: merge it", approved),
+        ("review:waiting", "waiting for a person's review", waiting),
+        (
+            "review:draft",
+            "draft pull requests (review, then mark ready)",
+            draft,
+        ),
+        (
+            "review:none",
+            "in review on the board, with no open pull request",
+            none,
         ),
     ]
 }
@@ -2371,6 +2507,72 @@ mod tests {
         assert!(matches!(&uat[0], Row::Heading { count: 1, .. }));
         assert_eq!(items(&uat), vec![30]);
         assert!(matches!(&uat[2], Row::Heading { count: 0, .. }));
+    }
+
+    #[test]
+    fn development_and_code_review_have_their_own_screens() {
+        let mut raw = fixture::raw();
+        let mut push = |n: u64, title: &str, body: &str, stage: &str| {
+            raw.issues.push(serde_json::json!({
+                "number": n, "title": title, "state": "OPEN", "body": body,
+                "labels": {"nodes": []},
+                "projectItems": {"nodes": [{"id": format!("I{n}"), "project": {"id": "PVT_x"},
+                    "fieldValues": {"nodes": [{"name": stage, "field": {"name": "Etapa"}}]}}]}}));
+        };
+        push(31, "[STORY] pagar", "", STAGE_READY);
+        push(32, "[STORY] estornar", "Depende de: #31", STAGE_READY);
+        push(33, "[STORY] listar", "", STAGE_DEVELOPMENT);
+        let s = snapshot::build(&raw, &fixture::cfg(), 1);
+        let of = |groups: Groups, key: &str| -> Vec<u64> {
+            groups
+                .into_iter()
+                .find(|(k, _, _)| *k == key)
+                .map(|(_, _, v)| v.iter().map(|i| i.number).collect())
+                .unwrap()
+        };
+        assert_eq!(of(development_groups(&s), "development:going"), vec![33]);
+        assert!(of(development_groups(&s), "development:ready").contains(&31));
+        // the fixture's Story #3 waits too: it depends on #2, still in review
+        assert_eq!(
+            of(development_groups(&s), "development:waiting"),
+            vec![3, 32]
+        );
+        // the fixture's Story #2 has an open draft pull request: it is
+        // review's, and a second build of it is refused
+        assert!(
+            development_groups(&s)
+                .iter()
+                .all(|(_, _, v)| v.iter().all(|i| i.number != 2))
+        );
+        assert_eq!(of(code_review_groups(&s), "review:draft"), vec![2]);
+
+        let mut v = view();
+        v.snap = Some(s);
+        on_item(&mut v, Screen::Development, 31);
+        assert_eq!(v.handle_key(&key(KeyCode::Char('r'))), Outcome::None);
+        let Some(Modal::Confirm { lines, op }) = &v.modal else {
+            panic!("no confirmation: {:?}", v.modal)
+        };
+        assert!(lines[0].starts_with("Build Story #31"), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("draft pull request")));
+        assert_eq!(
+            *op,
+            Op::RunStep {
+                number: 31,
+                apply: false
+            }
+        );
+        v.modal = None;
+        on_item(&mut v, Screen::Development, 32);
+        let Outcome::Notice(said) = v.handle_key(&key(KeyCode::Char('r'))) else {
+            panic!("a blocked build asked for a confirmation")
+        };
+        assert!(said.contains("dependency-pending"), "{said}");
+        on_item(&mut v, Screen::CodeReview, 2);
+        let Outcome::Notice(said) = v.handle_key(&key(KeyCode::Char('r'))) else {
+            panic!("a second build was offered")
+        };
+        assert!(said.contains("pr-pending"), "{said}");
     }
 
     #[test]

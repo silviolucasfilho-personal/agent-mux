@@ -16,6 +16,7 @@
 //! - [`doctor`], [`cli`]: `agent-mux project …`.
 
 pub mod apply;
+pub mod build;
 pub mod cli;
 pub mod config;
 pub mod contract;

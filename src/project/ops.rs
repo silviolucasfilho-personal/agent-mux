@@ -31,11 +31,11 @@ pub struct Report {
 }
 
 impl Report {
-    fn say(&mut self, line: impl Into<String>) {
+    pub(crate) fn say(&mut self, line: impl Into<String>) {
         self.lines.push(line.into());
     }
 
-    fn touch(&mut self, n: u64) {
+    pub(crate) fn touch(&mut self, n: u64) {
         if !self.touched.contains(&n) {
             self.touched.push(n);
         }
@@ -594,6 +594,106 @@ impl<'a> Ops<'a> {
         Ok(r)
     }
 
+    /// The board around a development step, as spec-wave's `implement`
+    /// moves it (`lib/implement-board.mjs` `planBoardMoves`). At the start
+    /// the item is in development and In Progress, with its Feature, and
+    /// its Tasks in development; at the end the Tasks are Done, the item is
+    /// in code review, and the Feature follows once every Story is there.
+    /// Best effort: a move that fails is a line, never an error.
+    pub fn build_board(&self, success: bool, number: u64) -> Report {
+        let mut r = Report::default();
+        let item = match self.read(number) {
+            Ok(i) => i,
+            Err(e) => {
+                r.say(format!("! the board was not updated: {e}"));
+                return r;
+            }
+        };
+        let board = match self.board() {
+            Ok(b) => b,
+            Err(e) => {
+                r.say(format!("! the board was not updated: {e}"));
+                return r;
+            }
+        };
+        let story = item.item_type == Some(ItemType::Story);
+        let read = |numbers: &[u64]| -> Vec<Item> {
+            if numbers.is_empty() {
+                return Vec::new();
+            }
+            read_items(self.tools, self.cfg, numbers).unwrap_or_default()
+        };
+        let tasks: Vec<Item> = if story {
+            read(&item.children)
+                .into_iter()
+                .filter(|t| t.item_type == Some(ItemType::Task) && t.open)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let feature = if story {
+            item.parent
+                .and_then(|p| self.read(p).ok())
+                .filter(|p| p.item_type == Some(ItemType::Feature))
+        } else {
+            None
+        };
+        let mut step = |it: &Item, to: &str, status: &str, align: bool| {
+            let what = it.item_type.map_or("Issue", ItemType::as_str);
+            match self.advance(&board, it, to, Some(status)) {
+                Ok(true) => {
+                    r.touch(it.number);
+                    r.say(format!("{what} #{} → {to} / {status}", it.number));
+                }
+                // further on already: only the status is aligned, and only
+                // where spec-wave does (the moves of a start)
+                Ok(false) if align && it.stage.as_deref() == Some(to) => {
+                    if it.status.as_deref() != Some(status)
+                        && let Ok(id) = self.board_item(&board, it)
+                        && write::set_field(self.tools, self.cfg, &board, &id, FIELD_STATUS, status)
+                            .is_ok()
+                    {
+                        r.touch(it.number);
+                        r.say(format!("{what} #{} status → {status}", it.number));
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => r.say(format!("! {what} #{} was not moved: {e}", it.number)),
+            }
+        };
+        if !success {
+            if let Some(f) = &feature {
+                step(f, STAGE_DEVELOPMENT, STATUS_IN_PROGRESS, true);
+            }
+            step(&item, STAGE_DEVELOPMENT, STATUS_IN_PROGRESS, true);
+            for t in &tasks {
+                step(t, STAGE_DEVELOPMENT, STATUS_TODO, false);
+            }
+            return r;
+        }
+        for t in &tasks {
+            step(t, STAGE_DONE, STATUS_DONE, false);
+        }
+        step(&item, STAGE_CODE_REVIEW, STATUS_TODO, false);
+        if let Some(f) = &feature {
+            let others: Vec<u64> = f
+                .children
+                .iter()
+                .copied()
+                .filter(|c| *c != number)
+                .collect();
+            let behind = read(&others).into_iter().any(|s| {
+                s.item_type == Some(ItemType::Story)
+                    && s.open
+                    && !stage::at_or_past(s.stage.as_deref(), STAGE_CODE_REVIEW)
+            });
+            if !behind {
+                step(f, STAGE_CODE_REVIEW, STATUS_TODO, false);
+            }
+        }
+        r
+    }
+
     pub fn story_review(&self, number: u64) -> Result<Report, String> {
         let item = self.read(number)?;
         if item.item_type != Some(ItemType::Story) {
@@ -1083,6 +1183,84 @@ esac
             })
             .unwrap();
         assert!(f.writes().iter().any(|l| l.contains("optionId=o_ready")));
+    }
+
+    /// A Feature #3 with Stories #12 (Task #13) and #15, all Ready but
+    /// #15, which is at `other`.
+    fn build_fixture(other: &str) -> String {
+        let feature = format!(
+            r#"{},"subIssues":{{"nodes":[{{"number":12}},{{"number":15}}]}}"#,
+            node(3, "[FEATURE] Pedidos", &["[FEATURE]"], Some("✅ Ready"), "")
+        );
+        let story = format!(
+            r#"{},"parent":{{"number":3}},"subIssues":{{"nodes":[{{"number":13}}]}}"#,
+            node(12, "[STORY] ver", &["[STORY]"], Some("✅ Ready"), "")
+        );
+        let task = format!(
+            r#"{},"parent":{{"number":12}}"#,
+            node(13, "[TASK] endpoint", &["[TASK]"], Some("✅ Ready"), "")
+        );
+        let sibling = format!(
+            r#"{},"parent":{{"number":3}}"#,
+            node(15, "[STORY] filtrar", &["[STORY]"], Some(other), "")
+        );
+        nodes(&[feature, story, task, sibling])
+    }
+
+    #[test]
+    fn a_build_moves_the_board_as_spec_waves_implement_does() {
+        // the start: Feature and Story in development and In Progress, the
+        // Task in development and Todo
+        let f = fx(&build_fixture("✅ Ready"), "");
+        let r = f.ops().build_board(false, 12);
+        assert_eq!(
+            r.lines,
+            vec![
+                "Feature #3 → 🚧 Desenvolvimento / In Progress",
+                "Story #12 → 🚧 Desenvolvimento / In Progress",
+                "Task #13 → 🚧 Desenvolvimento / Todo",
+            ]
+        );
+        assert_eq!(r.touched, vec![3, 12, 13]);
+        let w = f.writes();
+        assert_eq!(w.len(), 6, "{w:?}");
+        assert!(w[0].contains("itemId=PVTI_3") && w[0].contains("optionId=o_dev"));
+        assert!(w[1].contains("itemId=PVTI_3") && w[1].contains("optionId=s_prog"));
+        assert!(w[5].contains("itemId=PVTI_13") && w[5].contains("optionId=s_todo"));
+
+        // the end: the Task is Done, the Story in review; the Feature stays
+        // while another Story is behind
+        let f = fx(&build_fixture("✅ Ready"), "");
+        let r = f.ops().build_board(true, 12);
+        assert_eq!(
+            r.lines,
+            vec![
+                "Task #13 → 🎉 Done / Done",
+                "Story #12 → 👀 Code Review / Todo",
+            ]
+        );
+
+        // the last Story takes its Feature along
+        let f = fx(&build_fixture("🧪 QA"), "");
+        let r = f.ops().build_board(true, 12);
+        assert_eq!(
+            r.lines.last().map(String::as_str),
+            Some("Feature #3 → 👀 Code Review / Todo")
+        );
+    }
+
+    #[test]
+    fn a_board_that_cannot_be_written_does_not_stop_a_build() {
+        let f = fx(
+            &build_fixture("✅ Ready"),
+            r#"  *"updateProjectV2ItemFieldValue"*) echo 'boom' >&2; exit 1 ;;"#,
+        );
+        let r = f.ops().build_board(false, 12);
+        assert!(r.touched.is_empty());
+        assert!(
+            r.lines.iter().all(|l| l.starts_with("! ")) && r.lines.len() == 3,
+            "{r:?}"
+        );
     }
 
     #[test]

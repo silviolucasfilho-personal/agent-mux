@@ -2,7 +2,7 @@
 
 A **Project** is a repository configured with spec-wave, opened in agent-mux: its epics, features, stories, tasks and bugs, read from its GitHub issues and its Projects v2 board, each with its stage, its documents, its pull requests and its next step.
 
-Three things are built: reading a Project, the first changes to it (create an item, move a card, repair a stage, triage a Bug, bring the board up to its pull requests), and running its document steps (spec, plan, bug document, their critique and validation, and the decomposition into Stories and Tasks). Every change is one you ask for and confirm. agent-mux never writes `.spec-wave.json`. The build, QA and the dev-agent fleet are the later phases of the design: `docs/superpowers/specs/2026-11-18-issue-based-project-management-design.md`.
+Four things are built: reading a Project, the first changes to it (create an item, move a card, repair a stage, triage a Bug, bring the board up to its pull requests), running its document steps (spec, plan, bug document, their critique and validation, and the decomposition into Stories and Tasks), and building one Story or fixing one Bug into a draft pull request. Every change is one you ask for and confirm. agent-mux never writes `.spec-wave.json` and never merges. A Feature built as a stack, QA and the dev-agent fleet are the later phases of the design: `docs/superpowers/specs/2026-11-18-issue-based-project-management-design.md`.
 
 ## 1. What you need
 
@@ -24,6 +24,8 @@ F1 → **Open project** opens the Project of the selected session's folder.
 | Technical review | Features whose plan is being written or reviewed, whose critique failed, or that wait for validation |
 | Decomposition | Approved Features and RFCs on their way to Stories and Tasks: to draft, draft in review, to audit, reviewed and ready to apply |
 | Ready | The Stories that are ready, under their Feature, in execution order |
+| Development | Stories and Bugs whose code is to be written: in development, ready to build, and waiting on a dependency that is not merged |
+| Code review | Items with an open pull request for their code: changes requested, approved, waiting for a person, still a draft; and items the board says are in review with no pull request |
 | Bugs | Bugs to triage first, then each later stage of a Bug's track |
 | UAT and release | What is in acceptance (Homologação) and what waits for deploy |
 | Milestones | Each open milestone, its Features and the state of each one's documents |
@@ -42,7 +44,7 @@ The left column holds the screens and, under them, the selected screen's rows. T
 | `o` | The issue in the browser |
 | `Ctrl+R` | Read the Project from GitHub again |
 | `Esc` | Clear the filter, then close |
-| `r` | Run the selected item's next document step |
+| `r` | Run the selected item's next step: a document step, or the build of a Story or the fix of a Bug |
 | `n` | New work item, under the selected one when it can have children |
 | `m` | Move the selected item to a later stage |
 | `M` | Repair its stage: any stage, earlier ones included, with a reason |
@@ -72,7 +74,7 @@ Items that wait on you are also rows of the inbox (`I`), under **Projects**, for
 
 ## 4. Running a step
 
-`r` on a Feature or a Bug (or `agent-mux project run <n>`) runs its next document step. The order is spec-wave's:
+`r` on a Feature or a Bug (or `agent-mux project run <n>`) runs its next document step; on a Story that is Ready or a Bug that was triaged it builds (see "Building a Story, fixing a Bug" below). The order is spec-wave's:
 
 | Item | Step | What happens |
 | --- | --- | --- |
@@ -121,7 +123,36 @@ agent-mux project run <n> --harness codex --critic claude
 
 A step runs on Claude Code unless `--harness` names another; only the six harnesses agent-mux traces are accepted. `--critic` puts the audit on a different harness. On Claude Code the model is the one `.spec-wave.json` asks for (`ai.models`, `ai.escalationModel` from the second audit, a `spec-wave:model:<alias>` label on the issue). From a screen, `r` starts the step as a process of its own, on Claude Code; the notice names its log file, and the run is in the runs view (`W`) like any flow's.
 
-The six flows (`project-spec`, `project-plan`, `project-bug`, `project-critique`, `project-decompose`, `project-decompose-rfc`), their step skills (`wf-project-*`, ported from spec-wave's prompts, in Portuguese) and their agents (`spec-writer`, `tech-lead`, `critic`) are in the Configuration view (`C`) and can be edited like any other.
+The flows (`project-spec`, `project-plan`, `project-bug`, `project-critique`, `project-decompose`, `project-decompose-rfc`, and the two build flows below), their step skills (`wf-project-*`; the document ones are ported from spec-wave's prompts, in Portuguese) and their agents (`spec-writer`, `tech-lead`, `critic`, and the factory's `implementer` and `reviewer`) are in the Configuration view (`C`) and can be edited like any other.
+
+### Building a Story, fixing a Bug
+
+`project run <n>` on a Story that is Ready, or on a Bug that was triaged, writes its code:
+
+```
+agent-mux project run <story> --dry-run     where it would build, its Tasks, the branch
+agent-mux project run <story>               build it
+agent-mux project run <bug>                 fix it
+```
+
+1. **The board** moves at once: the Story (and its Feature) to Desenvolvimento / In Progress, its Tasks to Desenvolvimento.
+2. **One session writes the code** (flow `project-story` or `project-bug-fix`) in a worktree of the code repository, forked from the remote's default branch. Your checkout is not touched. The session reads what spec-wave's `implement` would hand its executor: the Story, its open Tasks in order, people's comments, and the Feature's merged spec and plan. A Bug's session follows spec-wave's four phases (a failing test, the root cause, the smallest fix, the regression test) and reads `bug.md` as a hypothesis to confirm.
+3. **A second session reviews the committed diff**, on another harness when one is installed, against the Story's acceptance criteria (the bullets under its "Critérios de aceite" heading) and one criterion per Task. The work goes back to the first session at most twice.
+4. **agent-mux delivers**, only when the review approved with every criterion passing: it pushes one branch (`story/<n>-<slug>` or `fix/<n>-<slug>`, never the default branch, never forced), opens a **draft** pull request whose description starts with `Closes <owner>/<hub>#<n>` (`Fixes` for a Bug), moves the Tasks to Done and the Story to Code Review (the Feature too, once every Story is there), and leaves a note on the issue.
+
+Otherwise nothing is pushed and nothing is written to GitHub but the board's first move: the command says what the review found and where the work is (its worktree and branch).
+
+What stops a build before it starts, each with its reason:
+
+- **A dependency that is not merged** (`Depende de:` or blocked-by on an item that is open and before QA). The build forks from the default branch, which would not have that code. `--ignore-dependencies` builds anyway, and the session is told.
+- **An open pull request** for the item: review it, or close it to build again.
+- **The branch already on the remote** with no pull request: open the pull request from it, or delete it.
+- **A Task** on its own: it is built with its Story.
+- **A Feature**: its Stories are built one at a time, and the message names the next in order.
+
+Where the code goes: the repository of the item's `repo:<slug>` label, found as spec-wave finds it (a `dirs` entry in the hub's `.spec-wave/workspace.json`, the folder beside the hub, then `.spec-wave/repos/<slug>` in the hub). An item with no label is built in the hub. The folder must be a checkout of that repository. An item with several labels is not built yet.
+
+Commits carry spec-wave's trailers (`Spec-Wave-Story: #n`, `Spec-Wave-Tasks: #a, #b`), which its `merge` reads. The session is asked for them; when no commit has them, agent-mux adds one empty commit that does.
 
 ## 5. The next step
 
@@ -196,7 +227,9 @@ A read that fails never becomes a fact. A document whose listing failed is `unkn
 
 ## 9. Not built yet
 
-- The build, QA and the dev-agent fleet.
+- A Feature built as a stack of Stories, a Story across several repositories, `project merge`, and fixing a pull request's review comments.
+- QA and the dev-agent fleet (dispatch, slots, the lease).
+- Tagging a step's sessions with their work item in the trace store: a build is an ordinary flow run in the runs view today.
 - Recording a Tech Leader's decision on a finding (`risk-accepted`).
 - Driving the repository's own Actions by trigger label instead of agent-mux's flows.
 - Editing an item's title, body, milestone or priority from agent-mux.

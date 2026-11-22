@@ -12,6 +12,14 @@ fn index(stage: &str) -> Option<usize> {
     STAGE_ORDER.iter().position(|s| *s == stage)
 }
 
+/// Whether `stage` is `target` or a later stage of the canonical order.
+pub fn at_or_past(stage: Option<&str>, target: &str) -> bool {
+    match (stage.and_then(index), index(target)) {
+        (Some(s), Some(t)) => s >= t,
+        _ => false,
+    }
+}
+
 /// Why a move is or is not made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MoveReason {

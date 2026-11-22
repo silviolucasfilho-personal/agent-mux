@@ -1,0 +1,60 @@
+# A development step of the Projects flow (docs/project.md): the code of
+# one work item, written and reviewed. agent-mux, not a session, pushes
+# the branch, opens the draft pull request and moves the board.
+[workflow]
+name = "project-story"
+description = "Build one Story of a Project: its Tasks in order, committed in a worktree, with an independent review."
+when_to_use = "Started by `agent-mux project run` for a Story that is Ready. The run forks from the default branch of the code repository."
+output = "build"
+default_isolation = "worktree"
+
+[args.kind]
+description = "What is built: story or bug."
+default = "story"
+[args.context]
+description = "The implementation context: the Story, its Tasks in order, the comments, the spec and the plan."
+required = true
+[args.criteria]
+description = "The acceptance criteria the reviewer judges, one per line."
+required = true
+[args.setup]
+description = "A command the implementer runs once in its worktree before it starts."
+default = ""
+
+[schemas.file_change]
+fields.path = { type = "string", required = true }
+fields.change = { type = "string", required = true }
+[schemas.check]
+fields.command = { type = "string", required = true }
+fields.result = { type = "string", required = true }
+[schemas.implementation]
+fields.base = { type = "string", required = true }
+fields.change_summary = { type = "array", items = "file_change", required = true }
+fields.verification = { type = "array", items = "check", required = true }
+fields.deviations = { type = "array", items = "string", required = true }
+fields.known_limitations = { type = "array", items = "string", required = true }
+
+[schemas.criterion]
+fields.criterion = { type = "string", required = true }
+fields.pass = { type = "boolean", required = true }
+fields.evidence = { type = "string", required = true }
+[schemas.review]
+fields.verdict = { type = "string", enum = ["approve", "request_changes", "reject"], required = true }
+fields.criteria_results = { type = "array", items = "criterion", required = true }
+fields.blocking_findings = { type = "array", items = "string", required = true }
+fields.suggestions = { type = "array", items = "string", required = true }
+fields.summary = { type = "string", required = true }
+
+# The implementer works in a worktree of the code repository and commits;
+# the reviewer reads the branch there, on another harness when there is
+# one. Sent back at most max_cycles times.
+[[steps]]
+id = "build"
+kind = "revise"
+phase = "Build"
+agent = "implementer"
+skill = "wf-project-build"
+args = { kind = "{args.kind}", context = "{args.context}", criteria = "{args.criteria}", setup = "{args.setup}" }
+result = "implementation"
+review = { agent = "reviewer", skill = "wf-project-review", harness = "other", result = "review", pass = "verdict == \"approve\"", stop = "verdict == \"reject\"" }
+max_cycles = 2
