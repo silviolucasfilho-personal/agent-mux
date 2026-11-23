@@ -99,13 +99,18 @@ fn invalid(reason: impl AsRef<str>) -> String {
 /// fenced block is body. The same tracker runs in the parser and in the
 /// escaping of the renderer.
 #[derive(Default)]
-struct Fences {
+pub(crate) struct Fences {
     open: Option<(char, usize)>,
 }
 
 impl Fences {
+    /// Whether a block was opened and never closed.
+    pub(crate) fn is_open(&self) -> bool {
+        self.open.is_some()
+    }
+
     /// Whether `line` is inside a fenced block, the fence lines included.
-    fn inside(&mut self, line: &str) -> bool {
+    pub(crate) fn inside(&mut self, line: &str) -> bool {
         let indent = line.len() - line.trim_start_matches(' ').len();
         let rest = &line[indent..];
         let fence = rest.chars().next().filter(|c| *c == '`' || *c == '~');

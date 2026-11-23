@@ -260,9 +260,11 @@ pub fn auto_moves(snap: &Snapshot) -> Vec<AutoMove> {
 
 impl<'a> Ops<'a> {
     fn read(&self, number: u64) -> Result<Item, String> {
-        read_items(self.tools, self.cfg, &[number])?
-            .into_iter()
-            .next()
+        let mut items = read_items(self.tools, self.cfg, &[number])?;
+        // the one asked for, whatever else the read returned
+        let at = items.iter().position(|i| i.number == number).unwrap_or(0);
+        (at < items.len())
+            .then(|| items.swap_remove(at))
             .ok_or_else(|| {
                 format!(
                     "issue #{number} was not found in {}",
@@ -592,6 +594,22 @@ impl<'a> Ops<'a> {
             ));
         }
         Ok(r)
+    }
+
+    /// Puts an item at a stage with a status, reading it now. `Ok(false)`:
+    /// the stage rule kept it where it is (a stage only advances).
+    pub(crate) fn place(&self, number: u64, to: &str, status: &str) -> Result<bool, String> {
+        let item = self.read(number)?;
+        let board = self.board()?;
+        self.advance(&board, &item, to, Some(status))
+    }
+
+    /// Sets an item's `Status` and leaves its stage.
+    pub(crate) fn set_status_of(&self, number: u64, status: &str) -> Result<(), String> {
+        let item = self.read(number)?;
+        let board = self.board()?;
+        let id = self.board_item(&board, &item)?;
+        write::set_field(self.tools, self.cfg, &board, &id, FIELD_STATUS, status).map(|_| ())
     }
 
     /// Sets the board's `Story Points` of an item to `points`, one of the

@@ -1,6 +1,6 @@
 # Projects: every spec-wave flow, in agent-mux — design
 
-Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, and phase 4 in nine parts (§19 to §31), with what each left out named there; phases 5 and 6 are not.
+Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, phase 4 in nine parts (§19 to §31) and the first part of phase 5 (§32), with what each left out named there; the rest of phase 5 and phase 6 are not.
 
 **The requirement.** Any repository configured with spec-wave must open in
 agent-mux as a **Project** and work there: every flow spec-wave has, each
@@ -1603,3 +1603,54 @@ Built on 2026-11-23: the rest of §9.3, all read-only and all over
 - **Phase 4 is built** as §19 to §31 describe, each naming what it left
   out. Phase 5 (QA, milestones' audit and trail) and phase 6 (`project
   init`, the web pages) are not started.
+
+## 32. Phase 5, first part, as built
+
+Built on 2026-11-23: QA of an item (§10), the port of spec-wave's
+`commands/qa-run.mjs`, `lib/qa-exec.mjs`, `lib/qa-report.mjs` and the
+parser of `lib/qa-plan-doc.mjs`.
+
+- **`src/project/qa_plan.rs`** reads `qa-plan.md` (`parse`, `targets`):
+  the marker, the scenarios by position, the Story in each title, the
+  four fields, a heading inside a code fence left as body. It does not
+  render or validate a plan: writing the plan is the next part.
+- **`src/project/qa.rs`** holds the rules as pure functions (`gate`,
+  `green_target`, `open_bugs`, `feature_pending`, `regression_section`,
+  `validate_results`, `aggregate`, `combine`, `parse_last_report`,
+  `render_report`, `render_bug_doc`, `context`) and the two steps on
+  `Ctx`: `qa_plan` (reads everything, writes nothing) and `qa_finish`.
+  The report's marker, table and `spec-wave:qa-results` block, the
+  origin marker of a Bug and the six sections of its `bug.md` are
+  spec-wave's, so either tool reads the other's.
+- **The verdict travels in the answer.** spec-wave's executor writes a
+  result file; here the session ends with a `workflow-result` block
+  (flow `project-qa`, skill `wf-project-qa`, agent `qa-analyst`), checked
+  by the same rules.
+- **Where it runs.** `project::cli::cmd_qa` makes a detached worktree of
+  the item's code repository at `origin/<default>` under the scratch
+  folder, runs the session there and removes it afterwards, whatever
+  happened. spec-wave runs in the operator's checkout. `qa.command` is
+  not executed; `qa.setup` and `qa.env` are given to the session, which
+  runs the setup itself, and `qa.env` is not put in its environment.
+- **A red scenario's `bug.md` goes up by pull request**
+  (`deliver::publish`, on `spec-wave/<bug>-bug`), after the Bug is
+  created, since the branch carries its number. spec-wave commits the
+  file to the default branch before creating the issue. So a Bug opened
+  by QA has `spec-wave:bug-approved` while its document still waits for
+  a merge, and its fix is planned from the report until then. When the
+  Bug cannot be created, its scenario counts as blocked and the run is
+  inconclusive, as spec-wave does when its push is refused.
+- **The Bug** is created with `write::create_issue` (labels `[BUG]`, the
+  severity, `spec-wave:origin:qa`), linked under the Story, placed in
+  Ready / Todo (`Ops::place`) and labelled `bug-approved`. It does not
+  inherit the Story's milestone, and its `Priority` field on the board
+  is not set.
+- **`planSha`** is seven hex digits of a SHA-256 of the plan (spec-wave:
+  SHA-1). Neither tool compares it across reports; a plan that changed
+  between the read and the finish is caught by comparing the two reads.
+- **Not built:** visual evidence (`evidenceFiles`, `qa.evidence`), a
+  Story tested across several repositories (the first is used, and the
+  command says so), and `qa` on the screens beyond the `Q` key.
+- **Left of phase 5:** the `qa-plan` step (write, publish and audit the
+  plan, which is what grants `qa-ready`), the QA of a milestone
+  (`qa-trail plan|run|report`), and `preflight` / `audit --milestone`.

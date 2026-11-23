@@ -1107,6 +1107,9 @@ fn draw_foot(f: &mut Frame, area: Rect, v: &ProjectView) {
             ("n", "new"),
             ("m", "move"),
         ];
+        if v.screen == Screen::Uat {
+            pairs.push(("Q", "run QA"));
+        }
         if v.screen == Screen::Development {
             pairs.extend([("d", "dispatch"), ("x", "take back")]);
         } else if v.screen == Screen::CodeReview {

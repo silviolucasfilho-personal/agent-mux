@@ -54,6 +54,7 @@ The left column holds the screens and, under them, the selected screen's rows. T
 | `P` | Merge: the pull requests of a Feature's Stories in order, or of one Story or Bug |
 | `t` `R` `D` | On a Bug: accept, reject, mark a duplicate |
 | `d` `x` | On Development: dispatch the item to the fleet; take a dispatched item back to Backlog (`b` does the same on a Blocked card) |
+| `Q` | Run QA on an item that is in QA (a Story, a Feature's pending Stories, or a Bug's regression test) |
 | `E` | Estimate the item in story points; with a proposal waiting, write it |
 | `W` | Propose a clearer description of the item; with a proposal waiting, write it |
 | `c` | Talk about the item: an interactive session with the item as its opening message |
@@ -228,6 +229,30 @@ agent-mux project merge <story or bug> --yes   one item's pull request
 
 `P` on a screen shows the same plan from the cache and asks before it starts the command.
 
+### QA of an item
+
+```
+agent-mux project qa <n> --dry-run     the scenarios it would run, and where
+agent-mux project qa <story>           the Story's scenarios
+agent-mux project qa <feature>         the scenarios of every Story not approved yet
+agent-mux project qa <bug>             the Bug's regression test
+agent-mux project qa <story> --only 2  one scenario again, after a fix
+```
+
+QA runs only on an item that is **in QA** (the merge moves it there; `qa` never promotes) and, for a Story or a Feature, only when the Feature has `spec-wave:qa-ready`. The scenarios come from the Feature's `qa-plan.md` on the default branch: each `## Cenário N — Story #<n>` belongs to one Story, and its number is its position in the file. A Bug's one scenario is the "Teste de Regressão" section of its `bug.md`.
+
+1. **A session executes the scenarios** (flow `project-qa`, agent `qa-analyst`) in a temporary worktree of the code repository at the default branch's tip, after `qa.setup` of the Project's file when it has one. It answers `pass`, `fail` or `blocked` for each, with the raw evidence. It fixes nothing: what it changes goes away with the worktree.
+2. **agent-mux checks the answer**: one verdict per scenario asked, a `fail` with evidence, a `blocked` with one of spec-wave's reasons. An answer outside these rules, or a plan that changed on the default branch while the session ran, writes nothing at all.
+3. **The 🧪 report** is posted on the issue, in spec-wave's format, with the block the next run reads. A run with `--only` keeps the other scenarios' verdicts from the last report.
+
+Then the verdict decides:
+
+- **Green** (every scenario of the scope passed): `spec-wave:qa-approved`, and a Story moves to Homologação (a Bug to Deploy). The Feature follows when every one of its Stories passed. A Story with an open Bug under it does not advance, even green.
+- **Red**: one Bug per failed scenario, created under the Story, in Ready, with the severity of `qa.defaultBugPriority` (P2; `--severity` changes it) and `spec-wave:bug-approved`. Its `bug.md` is written by agent-mux from the scenario and the evidence, with no model, and published on a pull request. The item stays in QA. A scenario that fails again comments on the Bug it already has. A Bug's own red regression test opens no new Bug.
+- **Blocked and nothing failed**: only the report. A broken environment is not a defect, so nothing moves and no Bug is created.
+
+Not done: screenshots and video as evidence, and a Story across several repositories is tested in the first one.
+
 ### The fleet
 
 Instead of running one item yourself and waiting, you can dispatch several and let agent-mux run them a few at a time.
@@ -384,6 +409,7 @@ agent-mux project dispatch <n> [--harness H] [--to <login>]
 agent-mux project cancel <n>
 agent-mux project fleet status [--json]
 agent-mux project fleet run [--once] [--dispatch <n>] [--max-runs N] [--max-failures N] [--poll SECONDS] [--label] [--delivery pr-stack|agent]
+agent-mux project qa <n> [--only a,b] [--severity P] [--harness H] [--dry-run]
 agent-mux project insights [<n>] [--scope progress|tech|daily|brainstorm] [--topic "…"] [--harness H] [--dry-run]
 agent-mux project estimate <n> [--yes] [--discard] [--harness H] [--dry-run] [--json]
 agent-mux project refine <n> [--yes] [--discard] [--harness H] [--dry-run] [--json]
@@ -419,7 +445,7 @@ A read that fails never becomes a fact. A document whose listing failed is `unkn
 ## 9. Not built yet
 
 - Closing the hub issue of a cross-repository Story when it reaches Done, and a Bug or a Task across several repositories.
-- QA.
+- Writing the QA plan (`qa-plan.md`) and auditing it, and the QA of a milestone (the trail and its cycles).
 - In the fleet: dispatching to a named developer from the screens (the command does it), the extra tracks of spec-wave's queue label (`devAgent.queues`), and rounds inside a run.
 - On the Observability screen: cost by model, critique attempts per document, and the time from Ready to Review.
 - Recording a Tech Leader's decision on a finding (`risk-accepted`).
