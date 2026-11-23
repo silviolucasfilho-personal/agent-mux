@@ -183,6 +183,8 @@ pub enum Outcome {
     OpenRun(String),
     /// Start an interactive session on this item.
     Chat(u64),
+    /// Start an interactive session on this item as this agent.
+    Agent(u64, String),
     /// Make this change on GitHub: the operator confirmed it.
     Run(Op),
 }
@@ -213,6 +215,9 @@ pub struct ProjectView {
     pub trace: Option<ItemTrace>,
     /// Where proposals (refine, estimate) wait: the CLI's scratch folder.
     pub scratch: PathBuf,
+    /// The agents a session on an item can run as (`a`): name and what
+    /// each is for, read when the screen opens.
+    pub agents: Vec<(String, String)>,
     /// The fleet's dispatches of this hub, read from the store on the tick.
     pub dispatches: Vec<crate::project::fleet::Dispatch>,
     /// The proposals waiting for the open item, read from `scratch`.
@@ -261,6 +266,7 @@ impl ProjectView {
             scratch: crate::project::run::scratch_dir(
                 &crate::tracing::analysis::default_snapshot_dir(),
             ),
+            agents: Vec::new(),
             dispatches: Vec::new(),
             proposals: Vec::new(),
             proposals_at: None,
@@ -618,7 +624,7 @@ impl ProjectView {
         let hub_root = self.hub_root();
         if !ctrl
             && let KeyCode::Char(c) = key.code
-            && matches!(c, 'm' | 'M' | 't' | 'R' | 'D' | 'r' | 'E' | 'W' | 'c')
+            && matches!(c, 'm' | 'M' | 't' | 'R' | 'D' | 'r' | 'E' | 'W' | 'c' | 'a')
         {
             return self.verb_key(c).unwrap_or(Outcome::None);
         }
@@ -822,6 +828,23 @@ pub fn chat_opening(invocation: &str, item: &Item, snap: &Snapshot) -> String {
     l.join("\n")
 }
 
+/// The opening message of a session one of the operator's agents runs on
+/// an item: the item and where it stands, and no skill. What the agent
+/// does with it is its own instructions'.
+pub fn agent_opening(agent: &str, item: &Item, snap: &Snapshot) -> String {
+    let mut l = vec![
+        format!(
+            "Work item #{} of {} is yours to look at, as the agent `{agent}`. This is what agent-mux has cached about it; `agent-mux project show {}` reads it again.",
+            item.number, snap.hub, item.number
+        ),
+        String::new(),
+    ];
+    l.extend(cli::card_lines(item, snap));
+    l.push(String::new());
+    l.push("Do for this item what your instructions say you do. Change nothing on GitHub (issues, labels, the board, pull requests) before I say yes: `agent-mux project next` shows the step the flow expects.".to_string());
+    l.join("\n")
+}
+
 /// A change on GitHub, as the operator asked for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
@@ -886,6 +909,10 @@ pub enum Pick {
     RepairTo(u64),
     /// The severity a Bug is accepted with; the first option keeps its own.
     Severity(u64),
+    /// Which of the operator's agents works on the item.
+    Agent(u64),
+    /// Which reading of the Project is asked for, or shown again.
+    Insights,
 }
 
 /// What a typed line is for.
@@ -974,7 +1001,20 @@ impl ProjectView {
         if !fleet_key
             && !matches!(
                 c,
-                'n' | 'm' | 'M' | 't' | 'R' | 'D' | 'A' | 'r' | 'f' | 'P' | 'E' | 'W' | 'c'
+                'n' | 'm'
+                    | 'M'
+                    | 't'
+                    | 'R'
+                    | 'D'
+                    | 'A'
+                    | 'r'
+                    | 'f'
+                    | 'P'
+                    | 'E'
+                    | 'W'
+                    | 'c'
+                    | 'a'
+                    | 'I'
             )
         {
             return None;
@@ -1051,6 +1091,49 @@ impl ProjectView {
                     return need("talk about");
                 };
                 return Some(Outcome::Chat(it.number));
+            }
+            'I' => {
+                use crate::project::insights::{self, Scope};
+                // a reading that was kept is offered first, then the four to ask for
+                let mut options: Vec<String> = insights::saved(&self.scratch, &self.hub())
+                    .into_iter()
+                    .map(|(s, _)| format!("show the last {}", s.as_str()))
+                    .collect();
+                options.extend(Scope::ALL.iter().map(|s| format!("ask: {}", s.label())));
+                self.modal = Some(Modal::Pick {
+                    what: Pick::Insights,
+                    title: "Insights: a read-only session reads the Project; nothing is written"
+                        .into(),
+                    options,
+                    cursor: 0,
+                });
+            }
+            'a' => {
+                let Some(it) = target else {
+                    return need("run an agent on");
+                };
+                if self.agents.is_empty() {
+                    return Some(Outcome::Notice(
+                        "no agent to run: write one with `agent-mux agent new <name>` (docs/agents.md)"
+                            .into(),
+                    ));
+                }
+                self.modal = Some(Modal::Pick {
+                    what: Pick::Agent(it.number),
+                    title: format!("Run an agent on #{} (an interactive session)", it.number),
+                    options: self
+                        .agents
+                        .iter()
+                        .map(|(name, what)| {
+                            if what.is_empty() {
+                                name.clone()
+                            } else {
+                                format!("{name} — {what}")
+                            }
+                        })
+                        .collect(),
+                    cursor: 0,
+                });
             }
             'E' | 'W' => {
                 use crate::project::assist::{self, Kind};
@@ -1456,6 +1539,44 @@ impl ProjectView {
                 KeyCode::Enter => {
                     let choice = options.get(cursor).cloned().unwrap_or_default();
                     match what {
+                        Pick::Insights => {
+                            use crate::project::insights::{self, Scope};
+                            if let Some(name) = choice.strip_prefix("show the last ") {
+                                return match Scope::parse(name) {
+                                    Some(s) => Outcome::OpenDoc(insights::path(
+                                        &self.scratch,
+                                        &self.hub(),
+                                        s,
+                                    )),
+                                    None => Outcome::None,
+                                };
+                            }
+                            let asked = choice
+                                .strip_prefix("ask: ")
+                                .and_then(|l| l.split_whitespace().next())
+                                .and_then(Scope::parse);
+                            return match asked {
+                                Some(s) => Outcome::Run(Op::Process {
+                                    number: 0,
+                                    args: vec![
+                                        "insights".into(),
+                                        "--scope".into(),
+                                        s.as_str().into(),
+                                    ],
+                                    what: format!("the {} reading", s.as_str()),
+                                }),
+                                None => Outcome::None,
+                            };
+                        }
+                        Pick::Agent(number) => {
+                            // the option is `name — what it is for`
+                            let name = self
+                                .agents
+                                .get(cursor)
+                                .map(|(n, _)| n.clone())
+                                .unwrap_or(choice);
+                            return Outcome::Agent(number, name);
+                        }
                         Pick::MoveTo(number) => self.confirm(
                             vec![
                                 format!("Move #{number} to {choice}, with status Todo."),
@@ -2380,6 +2501,14 @@ impl App {
             stale = age < 0 || age >= cli::ttl_secs(cfg);
             view.snap = Some(snap);
         }
+        // personas only: an agent with a task of its own runs that task
+        view.agents = crate::agents::Catalog::load(&self.library_root(), Some(dir))
+            .entries
+            .iter()
+            .filter_map(|e| e.spec.as_ref())
+            .filter(|s| s.task.is_none())
+            .map(|s| (s.name.clone(), s.description.clone()))
+            .collect();
         view.rebuild();
         self.mode = Mode::Project(Box::new(view));
         if stale {
@@ -2498,6 +2627,17 @@ impl App {
     /// its opening message. The session is tagged with the item, so it is
     /// part of the item's trace.
     pub fn project_chat(&mut self, number: u64) -> Result<(), String> {
+        self.project_session(number, None)
+    }
+
+    /// `project_chat` as one of the operator's agents (`a` on an item):
+    /// the agent's own instructions, tools and model, with the item as the
+    /// first message in place of the `/project` skill.
+    pub fn project_agent(&mut self, number: u64, agent: &str) -> Result<(), String> {
+        self.project_session(number, Some(agent))
+    }
+
+    fn project_session(&mut self, number: u64, agent: Option<&str>) -> Result<(), String> {
         use crate::harness::Harness;
         let Mode::Project(view) = &self.mode else {
             return Err("no Project is open".into());
@@ -2524,11 +2664,14 @@ impl App {
             .find(|p| Harness::detect(&p.command) == Some(harness))
             .cloned()
             .ok_or("no profile runs it")?;
-        let message = chat_opening(
-            &crate::skill::render::invocation(PROJECT_SKILL, harness),
-            item,
-            snap,
-        );
+        let message = match agent {
+            Some(name) => agent_opening(name, item, snap),
+            None => chat_opening(
+                &crate::skill::render::invocation(PROJECT_SKILL, harness),
+                item,
+                snap,
+            ),
+        };
         let tag = crate::project::ProjectLaunch {
             hub: snap.hub.clone(),
             item: number,
@@ -2538,17 +2681,42 @@ impl App {
                 .map(|f| f.number)
                 .filter(|f| *f != number),
             milestone: item.milestone.clone(),
-            step: "chat".into(),
+            step: match agent {
+                Some(name) => format!("agent:{name}"),
+                None => "chat".into(),
+            },
             attempt: 1,
-            role: "chat".into(),
+            role: if agent.is_some() { "agent" } else { "chat" }.into(),
             executor: "operator".into(),
             ..Default::default()
         };
-        let def = self
-            .find_skill(PROJECT_SKILL)
-            .ok_or("the project skill is not available")?;
-        crate::skill::install::install(def, harness, &self.skill_home(), false)
-            .map_err(|e| format!("installing the project skill for {}: {e}", harness.as_str()))?;
+        let mut env = Vec::new();
+        let message = match agent {
+            Some(name) => {
+                // the agent's own command-line changes, as the New session
+                // dialog applies them
+                let (plan, _) = self.session_agent(name, Some(harness), &dir)?;
+                profile.args.retain(|a| !plan.remove.contains(a));
+                profile.args.extend(plan.args.iter().cloned());
+                if let Some(e) = plan.effort.as_deref()
+                    && let Some(mut a) = crate::workflows::harness::effort_args(harness, e)
+                {
+                    profile.args.append(&mut a);
+                }
+                env = plan.env.clone();
+                plan.with_preamble(&message)
+            }
+            None => {
+                let def = self
+                    .find_skill(PROJECT_SKILL)
+                    .ok_or("the project skill is not available")?;
+                crate::skill::install::install(def, harness, &self.skill_home(), false).map_err(
+                    |e| format!("installing the project skill for {}: {e}", harness.as_str()),
+                )?;
+                message
+            }
+        };
+        let agent_name = agent.map(str::to_string);
         let opening = harness.opening_args(message);
         profile.args.extend(opening.iter().cloned());
         self.launch_project = Some(tag);
@@ -2557,10 +2725,10 @@ impl App {
             dir,
             opening_args: opening,
             continued_from: Some(format!("work item #{number}")),
-            agent: None,
+            agent: agent_name,
             link: None,
             attach: None,
-            env: Vec::new(),
+            env,
         });
         self.launch_project = None;
         started
@@ -2733,7 +2901,12 @@ impl App {
             let name = format!("project-{}-{number}-{}", args[0], crate::project::now_ns());
             self.notice = Some(match self.start_project_process(&name, &args) {
                 Ok(log) => Notice::info(format!(
-                    "started {what} of #{number}; its output is in {}. [Ctrl+R] reads the result",
+                    "started {what}{}; its output is in {}. [Ctrl+R] reads the result",
+                    if *number == 0 {
+                        String::new()
+                    } else {
+                        format!(" of #{number}")
+                    },
                     log.display()
                 )),
                 Err(e) => Notice::error(format!("project: {e}")),
@@ -2826,6 +2999,11 @@ impl App {
             Outcome::LoadTrace(n) => self.project_load_trace(n),
             Outcome::Chat(n) => {
                 if let Err(e) = self.project_chat(n) {
+                    self.notice = Some(Notice::error(format!("project: {e}")));
+                }
+            }
+            Outcome::Agent(n, name) => {
+                if let Err(e) = self.project_agent(n, &name) {
                     self.notice = Some(Notice::error(format!("project: {e}")));
                 }
             }
@@ -3218,6 +3396,75 @@ mod tests {
         v.rebuild();
         v.handle_key(&key(KeyCode::Char('d')));
         assert!(v.modal.is_none());
+    }
+
+    #[test]
+    fn an_agent_is_picked_for_an_item_and_insights_are_asked_or_shown() {
+        use crate::project::insights::{self, Scope};
+        let scratch = tempfile::tempdir().unwrap();
+        let mut v = view();
+        v.scratch = scratch.path().to_path_buf();
+        v.item = Some(ItemScreen {
+            number: 2,
+            tab: 0,
+            cursor: 0,
+            scroll: 0,
+            back: vec![],
+        });
+        // no agent to run: the key says how to make one
+        assert!(matches!(
+            v.handle_key(&key(KeyCode::Char('a'))),
+            Outcome::Notice(m) if m.contains("agent-mux agent new")
+        ));
+        v.agents = vec![
+            ("reviewer".into(), "Reviews a change".into()),
+            ("skeptic".into(), String::new()),
+        ];
+        v.handle_key(&key(KeyCode::Char('a')));
+        let Some(Modal::Pick { options, title, .. }) = &v.modal else {
+            panic!("no picker: {:?}", v.modal)
+        };
+        assert!(title.contains("#2"), "{title}");
+        assert_eq!(options, &["reviewer — Reviews a change", "skeptic"]);
+        v.handle_key(&key(KeyCode::Down));
+        // the name is the agent's, not the row's text
+        assert_eq!(
+            v.handle_key(&key(KeyCode::Enter)),
+            Outcome::Agent(2, "skeptic".into())
+        );
+        let snap = v.snap.as_ref().unwrap();
+        let text = agent_opening("skeptic", snap.item(2).unwrap(), snap);
+        assert!(
+            text.contains("as the agent `skeptic`") && !text.contains("/project"),
+            "{text}"
+        );
+        assert!(text.contains("Change nothing on GitHub"), "{text}");
+
+        // insights: nothing kept yet, so the four scopes are offered
+        v.item = None;
+        v.handle_key(&key(KeyCode::Char('I')));
+        let Some(Modal::Pick { options, .. }) = &v.modal else {
+            panic!("no picker: {:?}", v.modal)
+        };
+        assert_eq!(options.len(), 4);
+        assert!(options[1].starts_with("ask: tech"), "{options:?}");
+        v.handle_key(&key(KeyCode::Down));
+        assert_eq!(
+            v.handle_key(&key(KeyCode::Enter)),
+            Outcome::Run(Op::Process {
+                number: 0,
+                args: vec!["insights".into(), "--scope".into(), "tech".into()],
+                what: "the tech reading".into(),
+            })
+        );
+        // one that was kept is offered first, and opens as a document
+        let file = insights::save(scratch.path(), "acme/hub", Scope::Tech, "# x\n").unwrap();
+        v.handle_key(&key(KeyCode::Char('I')));
+        let Some(Modal::Pick { options, .. }) = &v.modal else {
+            panic!("no picker: {:?}", v.modal)
+        };
+        assert_eq!(options[0], "show the last tech");
+        assert_eq!(v.handle_key(&key(KeyCode::Enter)), Outcome::OpenDoc(file));
     }
 
     #[test]

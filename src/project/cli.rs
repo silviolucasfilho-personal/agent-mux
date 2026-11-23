@@ -58,6 +58,11 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
         run the dispatched items, at most N at a time (3), each as `project run <n>`
         under a lease on the hub's remote; --once ends when nothing is left to run
 
+  agent-mux project insights [<n>] [--scope progress|tech|daily|brainstorm] [--topic \"…\"] [--harness H] [--dry-run]
+        a read-only session reads where the Project stands (or one item and what is
+        under it) and says what matters; the answer is shown and kept as a file.
+        Nothing is written to GitHub
+
   agent-mux project estimate <n> [--yes] [--discard] [--harness H] [--dry-run]
         a read-only session proposes the item's effort in story points, fitted to
         the board's `Story Points` options; --yes writes the proposal that is
@@ -121,6 +126,8 @@ const VALUE_FLAGS: &[&str] = &[
     "--poll",
     "--to",
     "--delivery",
+    "--scope",
+    "--topic",
 ];
 
 struct Args {
@@ -381,6 +388,7 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
         Some("dispatch") => cmd_dispatch(&a),
         Some("cancel") => cmd_cancel(&a),
         Some("fleet") => cmd_fleet(&a),
+        Some("insights") => cmd_insights(&a).await,
         Some("estimate") => cmd_assist(&a, super::assist::Kind::Estimate).await,
         Some("refine") => cmd_assist(&a, super::assist::Kind::Refine).await,
         None | Some("help") | Some("--help") | Some("-h") => {
@@ -1351,6 +1359,100 @@ fn fleet_run(a: &Args, settings: &crate::config::FleetSettings, poll: u64) -> an
             poll.min(2)
         }));
     }
+}
+
+/// `project insights [<n>] [--scope S] [--topic T] [--harness H]`.
+async fn cmd_insights(a: &Args) -> anyhow::Result<()> {
+    use super::insights::{self, Scope};
+    let e = env(a)?;
+    let scope = match a.value("--scope") {
+        Some(raw) => Scope::parse(raw).ok_or_else(|| {
+            anyhow::anyhow!("\"{raw}\" is not a scope: use progress, tech, daily or brainstorm")
+        })?,
+        None => Scope::Progress,
+    };
+    let root = match a.positional.first() {
+        Some(_) => Some(number(a)?),
+        None => None,
+    };
+    let harness =
+        harness_of(a.value("--harness"), Harness::Claude).map_err(|x| anyhow::anyhow!(x))?;
+    let s = snap(&e)?;
+    if let Some(n) = root
+        && s.item(n).is_none()
+    {
+        anyhow::bail!("issue #{n} is not in the Project");
+    }
+    let digest = insights::digest(&s, root, insights::MAX_ITEMS);
+    println!(
+        "{}: {} with the flow {} on {} (a read-only session; nothing is written to GitHub)",
+        s.hub,
+        scope.label(),
+        insights::FLOW_INSIGHTS,
+        harness.as_str()
+    );
+    if a.flag("--dry-run") {
+        println!("{digest}");
+        return Ok(());
+    }
+    let hub_root = steps::hub_root(&e.cfg).map_err(|x| anyhow::anyhow!(x))?;
+    let tag = super::ProjectLaunch {
+        hub: s.hub.clone(),
+        // a reading of the whole Project belongs to no item
+        item: root.unwrap_or(0),
+        item_type: root
+            .and_then(|n| s.item(n))
+            .and_then(|i| i.item_type)
+            .map(|t| t.as_str().to_string()),
+        step: format!("insights:{}", scope.as_str()),
+        attempt: 1,
+        executor: "operator".to_string(),
+        ..Default::default()
+    };
+    let result = run_flow(
+        insights::FLOW_INSIGHTS,
+        &hub_root,
+        harness,
+        json!({
+            "scope": scope.as_str(),
+            "digest": digest,
+            "topic": a.value("--topic").unwrap_or(""),
+        }),
+        None,
+        tag,
+    )
+    .await
+    .map_err(|x| anyhow::anyhow!(x))?;
+    let text = result
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if text.is_empty() {
+        anyhow::bail!("the session answered nothing");
+    }
+    let actions: Vec<String> = result
+        .get("actions")
+        .and_then(Value::as_array)
+        .map(|l| {
+            l.iter()
+                .filter_map(Value::as_str)
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let at = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let doc = insights::document(&s.hub, scope, root, text, &actions, &at);
+    println!("\n{doc}");
+    let scratch = steps::scratch_dir(&crate::tracing::analysis::default_snapshot_dir());
+    match insights::save(&scratch, &s.hub, scope, &doc) {
+        Ok(file) => println!("kept in {}", file.display()),
+        Err(why) => eprintln!("the answer was not kept: {why}"),
+    }
+    Ok(())
 }
 
 /// `project estimate|refine <n> [--yes] [--discard] [--harness H] [--json]`:
