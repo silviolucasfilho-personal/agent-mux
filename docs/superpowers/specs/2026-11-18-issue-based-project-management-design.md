@@ -1,6 +1,6 @@
 # Projects: every spec-wave flow, in agent-mux — design
 
-Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, and the first two parts of phase 4 (§19 to §24); nothing else is.
+Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, and the first three parts of phase 4 (§19 to §25); nothing else is.
 
 **The requirement.** Any repository configured with spec-wave must open in
 agent-mux as a **Project** and work there: every flow spec-wave has, each
@@ -1264,8 +1264,46 @@ flow `project-fix-pr`), and `launches.metadata.project`
   cache in the same store; with no cache the item is read alone.
 - **Not built, the rest of phase 4:** a Feature as a stack and marking
   its pull requests ready together (§7.2), a Story across repositories
-  (§7.3), a Task on its own, `project workspace`, the fleet (§8), the
-  item's Trace tab, the History badge, the MCP tool
-  `agent_mux_get_project_item` and the Langfuse mapping (§9.2, §9.3),
+  (§7.3), a Task on its own, `project workspace`, the fleet (§8),
   chat, refine and estimate on an item, the `/project` skill and the
-  other MCP tools.
+  other MCP tools. (The trace surfaces of §9.2 and §9.3 are §25.)
+
+## 25. Phase 4, third part, as built
+
+Built on 2026-11-23: where an item's trace is shown (§9.2, §9.3), all
+over `tracing::project_report`, which gained `runs` (the sessions of a
+report grouped by workflow run, `StepRun`), `run_line`, `session_steps`
+(the step of every recorded session, by the harness's session id) and
+`badge`.
+
+- **The item's Trace tab** (`ITEM_TABS[5]`, `app::project::ItemTrace`,
+  `ui::project::trace_tab`): the runs as a list, the selected run's
+  sessions under it. `App::project_load_trace` reads the store on the
+  spot when the tab opens, on `Ctrl+R` and on the way back from a run;
+  it is a local read, so it has no thread of its own. `Enter` opens the
+  run on the Run screen (`run_screen::Origin::Project`,
+  `App.project_return`, `return_to_project`), as the Factory screen does.
+- **History** (`App.history_steps`, `HistoryState.steps`): the badge
+  `#<n> <step>` in the sidebar and on the History screen, where `p`
+  keeps only the sessions of a step (`HistoryState.project_only`). The
+  spec says "filterable by Project"; the filter is every Project's
+  steps, not one Project's, since the History list is already scoped to
+  a folder.
+- **`agent_mux_get_project_item`** (`mcp::server::project_item_result`,
+  25 tools now): `item`, optional `hub` and `workspace`; the report plus
+  `runs`. An item with no session is an empty trace, not an error.
+- **Langfuse** (`map::MapCtx::projects`, learned by `note_launch` and
+  seeded for a replay by `seed_swarms`): `session.id = <hub>#<n>`, tags
+  `project`, `project:<step>`, `milestone:<m>`, and the launch's fields
+  as `project_*` metadata. A swarm's launch keeps the swarm's session.
+  `map::project_summary` is the summary trace (a root span and one
+  `project-run` span per run; deterministic ids, lower-cased hub).
+- **When the summary is sent.** §9.3 says "when an item reaches Review".
+  It is sent by `project::cli` after a `build`, a `fix` or a `fix-pr`
+  finished (`langfuse::send_project_summary`), delivered or not, since
+  the ids are deterministic and a later send updates it; and by
+  `agent-mux langfuse export-project <n>` (`langfuse::export_project`),
+  which also replays the item's sessions. A document step sends none.
+- **Not built from §9.3:** tokens and cost on the cards, the
+  Observability screen, Heimdall's `projects` section, the web pages
+  and the timeline view of `trace project`.

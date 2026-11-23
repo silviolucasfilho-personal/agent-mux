@@ -1033,7 +1033,10 @@ fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
             let marker = if is_selected { "> " } else { "  " };
             let (provider_badge, provider_style) =
                 (s.provider.badge(), Style::default().fg(s.provider.color()));
-            let max_title_len = (area.width as usize).saturating_sub(8).max(5);
+            let step = app.history_steps.get(&s.session_id);
+            let max_title_len = (area.width as usize)
+                .saturating_sub(8 + step.map_or(0, |b| b.chars().count() + 1))
+                .max(5);
             let title = if s.title.chars().count() > max_title_len {
                 let mut truncated: String = s
                     .title
@@ -1045,11 +1048,18 @@ fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 s.title.clone()
             };
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::raw(marker.to_string()),
                 Span::styled(format!("[{provider_badge}] "), provider_style),
-                Span::raw(title),
-            ]);
+            ];
+            if let Some(b) = step {
+                spans.push(Span::styled(
+                    format!("{b} "),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            spans.push(Span::raw(title));
+            let line = Line::from(spans);
             let item = ListItem::new(line);
             if is_selected && is_focused {
                 item.style(Style::default().add_modifier(Modifier::REVERSED))
@@ -2809,8 +2819,13 @@ fn draw_session_history(f: &mut Frame, history: &HistoryState, _app: &App) {
         "this project"
     };
     let left_title = format!(
-        " Past Sessions ({}) [a: {scope_label}] ",
-        history.sessions.len()
+        " Past Sessions ({}) [a: {scope_label}]{} ",
+        history.sessions.len(),
+        if history.project_only {
+            " [p: project steps]"
+        } else {
+            ""
+        }
     );
     let left_block = Block::default()
         .borders(Borders::ALL)
@@ -2818,10 +2833,13 @@ fn draw_session_history(f: &mut Frame, history: &HistoryState, _app: &App) {
         .title(left_title);
 
     if history.sessions.is_empty() {
-        let hint =
-            Paragraph::new("\n  No past sessions found.\n\n  Press [a] to search all projects.")
-                .style(Style::default().fg(Color::DarkGray))
-                .block(left_block);
+        let hint = Paragraph::new(if history.project_only {
+            "\n  No session of a Project step here.\n\n  Press [p] to list every session."
+        } else {
+            "\n  No past sessions found.\n\n  Press [a] to search all projects."
+        })
+        .style(Style::default().fg(Color::DarkGray))
+        .block(left_block);
         f.render_widget(hint, left);
     } else {
         let items: Vec<ListItem> = history
@@ -2843,11 +2861,16 @@ fn draw_session_history(f: &mut Frame, history: &HistoryState, _app: &App) {
                         Style::default().fg(other.color()),
                     ),
                 };
+                let step = history.steps.get(&s.session_id);
                 let title_str = truncate_chars(&s.title, 18);
                 let line = Line::from(vec![
                     Span::raw(marker),
                     badge,
                     Span::raw(format!("{:<16} ", s.timestamp_str)),
+                    Span::styled(
+                        step.map(|b| format!("{b} ")).unwrap_or_default(),
+                        Style::default().fg(Color::Yellow),
+                    ),
                     Span::styled(
                         title_str,
                         Style::default().fg(if is_sel { Color::Yellow } else { Color::White }),
@@ -2925,7 +2948,7 @@ fn draw_session_history(f: &mut Frame, history: &HistoryState, _app: &App) {
 
     // Footer line
     let footer_text = Line::styled(
-        " [Tab] switch pane  [↑/↓/PgUp/PgDn] select/scroll  [a] toggle all projects  [r/Enter] resume  [Esc] close",
+        " [Tab] switch pane  [↑/↓/PgUp/PgDn] select/scroll  [a] toggle all projects  [p] project steps only  [r/Enter] resume  [Esc] close",
         Style::default().fg(Color::Black).bg(Color::Cyan),
     );
     f.render_widget(Paragraph::new(footer_text), footer);

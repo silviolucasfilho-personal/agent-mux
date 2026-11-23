@@ -42,6 +42,8 @@ pub enum Origin {
     Runs,
     /// A work item's run: back goes to the Factory screen.
     Factory,
+    /// A Project step's run: back goes to the item's Trace tab.
+    Project,
 }
 
 /// The run row's tabs.
@@ -1325,6 +1327,8 @@ impl App {
                         );
                     } else if st.origin == Origin::Factory {
                         self.return_to_factory();
+                    } else if st.origin == Origin::Project {
+                        self.return_to_project();
                     }
                 }
                 Some(Verb::Top) if pane => {

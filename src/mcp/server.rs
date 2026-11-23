@@ -97,6 +97,12 @@ pub fn tool_catalog() -> Vec<ToolSpec> {
             read_only: true,
         },
         ToolSpec {
+            name: "agent_mux_get_project_item",
+            description: "One work item of a Project (a spec-wave repository) as one trace: every session its steps started (spec, plan, critique, decompose, build, fix, fix-pr and their reviews), each with turns, tools, tokens and cost, grouped into runs; a Feature is read with its Stories and their Tasks. item is the issue number; the hub is the workspace's (.spec-wave.json) unless hub names it as owner/repo. CLI: agent-mux trace project <n>.",
+            input_schema: schema_of::<ProjectItemArgs>(),
+            read_only: true,
+        },
+        ToolSpec {
             name: "agent_mux_list_peers",
             description: "List active peer CLI sessions in the workspace (Claude Code, Codex, Antigravity) with their launch_id, runtime state, current goal, active tools, claimed tasks, file leases and unread messages.",
             input_schema: schema_of::<BusListPeersArgs>(),
@@ -161,6 +167,66 @@ pub struct WorkflowRunArgs {
 }
 
 /// The workflow run tool: the run row, its sessions and its result.
+/// Arguments of `agent_mux_get_project_item`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectItemArgs {
+    /// The work item's issue number in the hub.
+    pub item: u64,
+    /// The hub as `owner/repo`; absent means the workspace's Project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub: Option<String>,
+    /// The folder whose `.spec-wave.json` names the hub (defaults to the
+    /// session's workspace).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+}
+
+/// `agent_mux_get_project_item`: the item's report
+/// (`tracing::project_report`), with its sessions grouped into runs.
+fn project_item_result(service: &TraceService, arguments: Value) -> Value {
+    use crate::tracing::project_report;
+    let args: ProjectItemArgs = match serde_json::from_value(arguments) {
+        Ok(a) => a,
+        Err(e) => {
+            return tool_error(&ServiceError::InvalidArgument(format!(
+                "invalid arguments for get_project_item: {e}"
+            )));
+        }
+    };
+    let ws = bus_workspace(service, args.workspace.as_deref());
+    let hub = match args.hub.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+        Some(h) => h.to_string(),
+        None => match crate::project::config::load(&ws) {
+            Ok(c) => c.hub_repo().slug(),
+            Err(e) => {
+                return tool_error(&ServiceError::InvalidArgument(format!(
+                    "{e}; name the hub with hub = \"owner/repo\""
+                )));
+            }
+        },
+    };
+    let conn = match crate::tracing::store::open_ro(&service.config().db_path) {
+        Ok(c) => c,
+        Err(e) => return tool_error(&ServiceError::DbUnavailable(e)),
+    };
+    let snap = crate::project::store::load(&conn, &hub).ok().flatten();
+    match project_report::report(&conn, &hub, args.item, snap.as_ref()) {
+        Ok(r) => {
+            let runs = project_report::runs(&r);
+            let mut data = serde_json::to_value(&r).unwrap_or(Value::Null);
+            if let Some(map) = data.as_object_mut() {
+                map.insert(
+                    "runs".into(),
+                    serde_json::to_value(&runs).unwrap_or(Value::Null),
+                );
+            }
+            bus_ok_envelope(&ws, data)
+        }
+        Err(e) => tool_error(&ServiceError::DbUnavailable(e.to_string())),
+    }
+}
+
 fn workflow_run_result(service: &TraceService, arguments: Value) -> Value {
     let args: WorkflowRunArgs = match serde_json::from_value(if arguments.is_null() {
         json!({})
@@ -1403,6 +1469,9 @@ pub fn handle_message(service: &TraceService, line: &str) -> Option<Value> {
                 "agent_mux_get_workflow_run" => {
                     return Some(rpc_result(id, workflow_run_result(service, arguments)));
                 }
+                "agent_mux_get_project_item" => {
+                    return Some(rpc_result(id, project_item_result(service, arguments)));
+                }
                 "agent_mux_list_peers" => {
                     return Some(rpc_result(id, bus_list_peers_result(service, arguments)));
                 }
@@ -1619,7 +1688,8 @@ mod tests {
     #[test]
     fn catalog_contains_trace_and_bus_tools() {
         let names = tool_names();
-        assert_eq!(names.len(), 24);
+        assert_eq!(names.len(), 25);
+        assert!(names.contains(&"agent_mux_get_project_item"));
         assert!(names.contains(&"agent_mux_swarm_plan"));
         assert!(names.contains(&"agent_mux_get_swarm"));
         assert!(names.contains(&"agent_mux_swarm_start"));
@@ -1645,11 +1715,64 @@ mod tests {
         );
         let list = tools_list_value();
         let tools = list["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 24);
+        assert_eq!(tools.len(), 25);
         for t in tools {
             assert_eq!(t["annotations"]["destructiveHint"], false);
             assert_eq!(t["inputSchema"]["type"], "object");
         }
+    }
+
+    #[test]
+    fn a_project_item_is_answered_as_one_trace() {
+        use crate::tracing::project_report::tests::{launch_row, tag};
+        use crate::tracing::store::model::StoreOp;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("traces.db");
+        let mut store =
+            crate::tracing::store::open_rw(&db, crate::tracing::store::OpenOptions::default())
+                .unwrap();
+        let t0 = 1_700_000_000_000_000_000i64;
+        for (id, at, label) in [
+            ("L-work", t0, "build"),
+            ("L-review", t0 + 1, "build/review"),
+        ] {
+            let op = StoreOp::Launch(launch_row(id, at, Some(&tag(12, "build", "run-2", label))));
+            assert_eq!(store.apply(&[op]).unwrap(), 0);
+        }
+        drop(store);
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let service =
+            TraceService::new(ServiceConfig::new(db, Scope::workspace(&ws).unwrap())).unwrap();
+        let call = |args: Value| -> Value {
+            let req = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                             "params": {"name": "agent_mux_get_project_item", "arguments": args}});
+            handle_message(&service, &req.to_string()).unwrap()["result"].clone()
+        };
+        let got = call(json!({"item": 12, "hub": "acme/hub"}));
+        assert_eq!(got["isError"], false, "{got}");
+        let data = &got["structuredContent"]["data"];
+        assert_eq!(data["hub"], "acme/hub");
+        assert_eq!(data["launches"].as_array().unwrap().len(), 2);
+        assert_eq!(data["launches"][1]["project"]["role"], "review");
+        assert_eq!(data["runs"].as_array().unwrap().len(), 1);
+        assert_eq!(data["runs"][0]["run"], "run-2");
+        assert_eq!(data["runs"][0]["sessions"], json!([0, 1]));
+        // an item nothing ran for is an empty trace, not an error
+        let none = call(json!({"item": 99, "hub": "acme/hub"}));
+        assert_eq!(none["isError"], false, "{none}");
+        assert_eq!(
+            none["structuredContent"]["data"]["launches"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        // no hub named and the workspace is not a Project
+        let lost = call(json!({"item": 12}));
+        assert_eq!(lost["isError"], true, "{lost}");
+        let text = lost.to_string();
+        assert!(text.contains("owner/repo"), "{text}");
     }
 
     #[test]

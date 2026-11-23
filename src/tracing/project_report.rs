@@ -174,7 +174,122 @@ pub fn report(
     })
 }
 
-fn session_line(l: &StepLaunch, now_ns: i64) -> String {
+/// One run of a step: the sessions that share a workflow run.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StepRun {
+    pub item: u64,
+    pub step: String,
+    pub attempt: u32,
+    /// The workflow run's id; empty when the launch recorded none.
+    pub run: String,
+    pub started_ns: i64,
+    /// `None` while a session of the run is going.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_ns: Option<i64>,
+    /// Indexes into the report's `launches`, oldest first.
+    pub sessions: Vec<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    pub unpriced: bool,
+}
+
+/// The runs of a report, in the order they started.
+pub fn runs(r: &ProjectReport) -> Vec<StepRun> {
+    let mut out: Vec<StepRun> = Vec::new();
+    for (at, l) in r.launches.iter().enumerate() {
+        let found = out
+            .iter_mut()
+            .find(|x| x.item == l.project.item && x.run == l.project.run && !x.run.is_empty());
+        match found {
+            Some(x) => {
+                x.sessions.push(at);
+                x.ended_ns = match (x.ended_ns, l.ended_ns) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    _ => None,
+                };
+                if let Some(t) = l.tokens {
+                    x.tokens = Some(x.tokens.unwrap_or(0) + t);
+                }
+                if let Some(c) = l.cost_usd {
+                    x.cost_usd = Some(x.cost_usd.unwrap_or(0.0) + c);
+                }
+                x.unpriced |= l.unpriced;
+            }
+            None => out.push(StepRun {
+                item: l.project.item,
+                step: l.project.step.clone(),
+                attempt: l.project.attempt,
+                run: l.project.run.clone(),
+                started_ns: l.started_ns,
+                ended_ns: l.ended_ns,
+                sessions: vec![at],
+                tokens: l.tokens,
+                cost_usd: l.cost_usd,
+                unpriced: l.unpriced,
+            }),
+        }
+    }
+    out
+}
+
+/// One line for a run in a list.
+pub fn run_line(x: &StepRun, now_ns: i64) -> String {
+    format!(
+        "{} #{} {}{} · {} · {} session(s) · {} tok · {} · {}",
+        if x.ended_ns.is_some() { "✓" } else { "●" },
+        x.item,
+        x.step,
+        if x.attempt > 1 {
+            format!(" (attempt {})", x.attempt)
+        } else {
+            String::new()
+        },
+        &fmt_time(x.started_ns)[..16],
+        x.sessions.len(),
+        fmt_tokens(x.tokens),
+        cost_label(x.cost_usd, x.unpriced),
+        span(x.started_ns, x.ended_ns, now_ns)
+    )
+}
+
+/// The Project step of every recorded session, by the harness's session
+/// id: what the History list badges a session with.
+pub fn session_steps(
+    conn: &Connection,
+) -> rusqlite::Result<std::collections::HashMap<String, ProjectLaunch>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.session_id, l.metadata
+         FROM launches l JOIN sessions s ON s.key = l.session_key
+         WHERE json_extract(l.metadata, '$.project.item') IS NOT NULL
+         ORDER BY l.started_ns ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+        ))
+    })?;
+    let mut out = std::collections::HashMap::new();
+    for row in rows {
+        let (id, meta) = row?;
+        if let Some(p) = serde_json::from_str::<serde_json::Value>(&meta)
+            .ok()
+            .and_then(|m| ProjectLaunch::from_metadata(&m))
+        {
+            out.insert(id, p);
+        }
+    }
+    Ok(out)
+}
+
+/// The badge of a step's session in a list: `#412 build`.
+pub fn badge(p: &ProjectLaunch) -> String {
+    format!("#{} {}", p.item, p.step)
+}
+
+pub fn session_line(l: &StepLaunch, now_ns: i64) -> String {
     format!(
         "{} {} · {} · {} turn(s) · {} tool(s){} · {} tok · {} · {}",
         if l.ended_ns.is_some() { "✓" } else { "●" },
@@ -292,12 +407,12 @@ pub fn log_lines(r: &ProjectReport, now_ns: i64) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::project::{Item, ItemType};
     use crate::tracing::store::model::{LaunchRow, StoreOp, TraceRow, TraceStatus};
 
-    fn launch_row(id: &str, started_ns: i64, p: Option<&ProjectLaunch>) -> LaunchRow {
+    pub(crate) fn launch_row(id: &str, started_ns: i64, p: Option<&ProjectLaunch>) -> LaunchRow {
         let mut meta = serde_json::Map::new();
         if let Some(p) = p {
             meta.insert("project".into(), p.metadata());
@@ -358,7 +473,7 @@ mod tests {
         }
     }
 
-    fn tag(item: u64, step: &str, run: &str, label: &str) -> ProjectLaunch {
+    pub(crate) fn tag(item: u64, step: &str, run: &str, label: &str) -> ProjectLaunch {
         ProjectLaunch {
             hub: "acme/hub".into(),
             item,
@@ -461,6 +576,22 @@ mod tests {
             "{tree}"
         );
         assert_eq!(log_lines(&r, t0).len(), 3);
+
+        // the runs: the spec's, then the build with its review
+        let rs = runs(&r);
+        assert_eq!(rs.len(), 2);
+        assert_eq!((rs[0].item, rs[0].step.as_str()), (3, "spec"));
+        assert_eq!(rs[1].sessions, vec![1, 2]);
+        assert_eq!(rs[1].run, "run-2");
+        let line = run_line(&rs[1], t0);
+        assert!(line.starts_with("✓ #12 build · 2023-11-1"), "{line}");
+        assert!(line.contains(" · 2 session(s) · "), "{line}");
+
+        // a session's badge, by the harness's session id
+        let steps = session_steps(&conn).unwrap();
+        let p = steps.get("L-build").expect("the build's session");
+        assert_eq!(badge(p), "#12 build");
+        assert!(!steps.contains_key("L-plain"));
 
         // a Story alone, and with no cached Project
         let r = report(&conn, "acme/hub", 12, None).unwrap();

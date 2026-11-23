@@ -674,19 +674,27 @@ fn seed_swarms(
 ) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
         "SELECT id, metadata FROM launches
-         WHERE session_key = ?1 AND json_extract(metadata, '$.swarm_id') IS NOT NULL",
+         WHERE session_key = ?1
+           AND (json_extract(metadata, '$.swarm_id') IS NOT NULL
+                OR json_extract(metadata, '$.project.item') IS NOT NULL)",
     )?;
     for key in session_keys {
         let rows: Vec<(String, String)> = stmt
             .query_map(rusqlite::params![key], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
         for (id, meta) in rows {
-            if let Some(sw) = serde_json::from_str::<serde_json::Value>(&meta)
-                .ok()
+            let meta = serde_json::from_str::<serde_json::Value>(&meta).ok();
+            if let Some(sw) = meta
                 .as_ref()
                 .and_then(crate::bus::swarm::SwarmLaunch::from_metadata)
             {
-                ctx.swarms.insert(id, sw);
+                ctx.swarms.insert(id.clone(), sw);
+            }
+            if let Some(p) = meta
+                .as_ref()
+                .and_then(crate::project::ProjectLaunch::from_metadata)
+            {
+                ctx.projects.insert(id, p);
             }
         }
     }
@@ -783,6 +791,74 @@ pub fn export_swarm(
         }
     }
     Ok(out)
+}
+
+/// Replays one work item of a Project to Langfuse (Projects spec §9.3):
+/// every session its steps started, so each turn sits in the item's
+/// Langfuse session, then the summary trace (`map::project_summary`).
+/// `agent-mux langfuse export-project <n>`.
+pub fn export_project(
+    conn: &rusqlite::Connection,
+    cfg: ExporterConfig,
+    ctx: MapCtx,
+    report: &crate::tracing::project_report::ProjectReport,
+    dry_run: bool,
+    deadline: Duration,
+) -> Result<ReplayReport, String> {
+    let mut keys: Vec<String> = Vec::new();
+    for l in &report.launches {
+        if let Some(k) = &l.session_key
+            && !keys.contains(k)
+        {
+            keys.push(k.clone());
+        }
+    }
+    let mut out = replay_sessions(conn, cfg.clone(), ctx.clone(), &keys, dry_run, deadline)?;
+    let summary = map::project_summary(report, &ctx);
+    out.events += summary.len();
+    if out.first_event.is_none() {
+        out.first_event = summary.first().map(|e| e.json.clone());
+    }
+    if !dry_run {
+        match send_events(&cfg, &summary) {
+            Ok(notes) => out.notes.extend(notes),
+            Err(e) => out.notes.push(e),
+        }
+    }
+    Ok(out)
+}
+
+/// Sends a work item's summary trace, when a step delivered it for review:
+/// reads the store, builds `map::project_summary`, posts it. `None` when
+/// Langfuse is not configured; else what happened, as one line.
+pub fn send_project_summary(
+    db_path: &std::path::Path,
+    settings: &crate::config::ResolvedTracing,
+    hub: &str,
+    item: u64,
+) -> Option<String> {
+    let lf = settings.langfuse.as_ref()?;
+    let conn = match crate::tracing::store::open_ro(db_path) {
+        Ok(c) => c,
+        Err(e) => return Some(format!("! langfuse: the store was not read: {e}")),
+    };
+    let snap = crate::project::store::load(&conn, hub).ok().flatten();
+    let report = match crate::tracing::project_report::report(&conn, hub, item, snap.as_ref()) {
+        Ok(r) => r,
+        Err(e) => return Some(format!("! langfuse: the item's trace was not read: {e}")),
+    };
+    if report.launches.is_empty() {
+        return None;
+    }
+    let ctx = MapCtx::from_settings(settings);
+    let events = map::project_summary(&report, &ctx);
+    Some(match send_events(&ExporterConfig::new(lf), &events) {
+        Ok(_) => format!(
+            "langfuse: the summary of #{item} was sent (session {})",
+            map::project_session_id(hub, item)
+        ),
+        Err(e) => format!("! {e}"),
+    })
 }
 
 /// Sends a swarm's summary trace from a thread of its own, when the swarm

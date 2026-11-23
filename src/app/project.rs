@@ -122,7 +122,18 @@ pub enum Focus {
 }
 
 /// The item screen's tabs.
-pub const ITEM_TABS: [&str; 5] = ["Card", "Documents", "Children", "Pull requests", "Thread"];
+pub const ITEM_TABS: [&str; 6] = [
+    "Card",
+    "Documents",
+    "Children",
+    "Pull requests",
+    "Thread",
+    "Trace",
+];
+/// The Thread tab: read from GitHub when it opens.
+pub const TAB_THREAD: usize = 4;
+/// The Trace tab: read from the trace store when it opens.
+pub const TAB_TRACE: usize = 5;
 
 /// The item screen: one work item over the list it was opened from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +154,16 @@ pub struct Thread {
     pub lines: Result<Vec<String>, String>,
 }
 
+/// The sessions the item's steps started, read from the trace store when
+/// the Trace tab opens.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ItemTrace {
+    pub number: u64,
+    pub report: Result<crate::tracing::project_report::ProjectReport, String>,
+    pub runs: Vec<crate::tracing::project_report::StepRun>,
+    pub read_ns: i64,
+}
+
 /// What the App does after a key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
@@ -156,6 +177,10 @@ pub enum Outcome {
     OpenDoc(PathBuf),
     /// Read the thread of this issue.
     LoadThread(u64),
+    /// Read the sessions of this item from the trace store.
+    LoadTrace(u64),
+    /// Open this workflow run on the Run screen.
+    OpenRun(String),
     /// Make this change on GitHub: the operator confirmed it.
     Run(Op),
 }
@@ -183,6 +208,7 @@ pub struct ProjectView {
     pub collapsed: BTreeSet<String>,
     pub item: Option<ItemScreen>,
     pub thread: Option<Thread>,
+    pub trace: Option<ItemTrace>,
     pub checks: Option<Vec<Check>>,
     pub syncing_since: Option<Instant>,
     /// A dialog over the screen: a picker, a line of text, the new-item
@@ -221,6 +247,7 @@ impl ProjectView {
             collapsed,
             item: None,
             thread: None,
+            trace: None,
             checks: None,
             syncing_since: None,
             modal: None,
@@ -411,6 +438,11 @@ impl ProjectView {
             1 => it.docs.len(),
             2 => s.children_of(it.number).len(),
             3 => it.pulls.len(),
+            TAB_TRACE => self
+                .trace
+                .as_ref()
+                .filter(|t| t.number == it.number)
+                .map_or(0, |t| t.runs.len()),
             _ => 0,
         }
     }
@@ -540,13 +572,17 @@ impl ProjectView {
         let Some(screen) = self.item.as_mut() else {
             return Outcome::None;
         };
-        let lists = matches!(screen.tab, 1..=3);
-        // the Thread tab is read when it opens
-        fn set_tab(screen: &mut ItemScreen, to: usize) -> Option<u64> {
+        let lists = matches!(screen.tab, 1..=3) || screen.tab == TAB_TRACE;
+        // the Thread and Trace tabs are read when they open
+        fn set_tab(screen: &mut ItemScreen, to: usize) -> Option<Outcome> {
             screen.tab = to;
             screen.cursor = 0;
             screen.scroll = 0;
-            (to == 4).then_some(screen.number)
+            match to {
+                TAB_THREAD => Some(Outcome::LoadThread(screen.number)),
+                TAB_TRACE => Some(Outcome::LoadTrace(screen.number)),
+                _ => None,
+            }
         }
         match key.code {
             KeyCode::Char('r') if ctrl => return Outcome::Sync,
@@ -565,19 +601,19 @@ impl ProjectView {
             },
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
                 let to = (screen.tab + 1) % ITEM_TABS.len();
-                if let Some(n) = set_tab(screen, to) {
-                    return Outcome::LoadThread(n);
+                if let Some(load) = set_tab(screen, to) {
+                    return load;
                 }
             }
             KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
                 let to = (screen.tab + ITEM_TABS.len() - 1) % ITEM_TABS.len();
-                if let Some(n) = set_tab(screen, to) {
-                    return Outcome::LoadThread(n);
+                if let Some(load) = set_tab(screen, to) {
+                    return load;
                 }
             }
-            KeyCode::Char(c @ '1'..='5') => {
-                if let Some(n) = set_tab(screen, c as usize - '1' as usize) {
-                    return Outcome::LoadThread(n);
+            KeyCode::Char(c @ '1'..='6') => {
+                if let Some(load) = set_tab(screen, c as usize - '1' as usize) {
+                    return load;
                 }
             }
             KeyCode::Down | KeyCode::Char('j') if lists => {
@@ -591,6 +627,19 @@ impl ProjectView {
             KeyCode::Char('o') => return Outcome::OpenUrl(issue_url(&hub, screen.number)),
             KeyCode::Enter => {
                 let (tab, cursor, number) = (screen.tab, screen.cursor, screen.number);
+                if tab == TAB_TRACE {
+                    let run = self
+                        .trace
+                        .as_ref()
+                        .filter(|t| t.number == number)
+                        .and_then(|t| t.runs.get(cursor))
+                        .map(|r| r.run.clone());
+                    return match run {
+                        Some(run) if !run.is_empty() => Outcome::OpenRun(run),
+                        Some(_) => Outcome::Notice("this session recorded no run".into()),
+                        None => Outcome::None,
+                    };
+                }
                 let Some(snap) = &self.snap else {
                     return Outcome::None;
                 };
@@ -2169,6 +2218,54 @@ impl App {
         });
     }
 
+    /// Reads the item's sessions from the trace store: a local read, made
+    /// on the spot each time the Trace tab opens.
+    fn project_load_trace(&mut self, number: u64) {
+        use crate::tracing::project_report;
+        let db = self.trace_db_path.clone();
+        let Mode::Project(view) = &mut self.mode else {
+            return;
+        };
+        let hub = view.hub();
+        let report = match db.as_deref().filter(|p| p.is_file()) {
+            None => Err("there is no trace store yet".to_string()),
+            Some(p) => crate::tracing::store::open_ro(p)
+                .map_err(|e| e.to_string())
+                .and_then(|conn| {
+                    project_report::report(&conn, &hub, number, view.snap.as_ref())
+                        .map_err(|e| e.to_string())
+                }),
+        };
+        let runs = report
+            .as_ref()
+            .map(project_report::runs)
+            .unwrap_or_default();
+        if let Some(screen) = view.item.as_mut() {
+            screen.cursor = screen.cursor.min(runs.len().saturating_sub(1));
+        }
+        view.trace = Some(ItemTrace {
+            number,
+            report,
+            runs,
+            read_ns: crate::project::now_ns(),
+        });
+    }
+
+    /// The Project screen a run was opened from, back as it was.
+    pub(crate) fn return_to_project(&mut self) {
+        if let Some(view) = self.project_return.take() {
+            let number = view
+                .item
+                .as_ref()
+                .filter(|i| i.tab == TAB_TRACE)
+                .map(|i| i.number);
+            self.mode = Mode::Project(view);
+            if let Some(n) = number {
+                self.project_load_trace(n);
+            }
+        }
+    }
+
     /// On the tick: results of reads that finished.
     pub fn project_tick(&mut self) {
         let Mode::Project(view) = &mut self.mode else {
@@ -2344,13 +2441,36 @@ impl App {
                 } else if view.syncing() {
                     self.notice = Some(Notice::info("the Project is being read"));
                 } else {
+                    let trace = view
+                        .item
+                        .as_ref()
+                        .filter(|i| i.tab == TAB_TRACE)
+                        .map(|i| i.number);
                     self.project_sync();
+                    if let Some(n) = trace {
+                        self.project_load_trace(n);
+                    }
                 }
             }
             Outcome::Notice(text) => self.notice = Some(Notice::info(text)),
             Outcome::OpenUrl(url) => self.open_url(&url),
             Outcome::OpenDoc(path) => self.open_markdown(&path),
             Outcome::LoadThread(n) => self.project_load_thread(n),
+            Outcome::LoadTrace(n) => self.project_load_trace(n),
+            Outcome::OpenRun(run) => {
+                let view = match std::mem::replace(&mut self.mode, Mode::Main) {
+                    Mode::Project(v) => v,
+                    other => {
+                        self.mode = other;
+                        return;
+                    }
+                };
+                if self.open_run_screen(&run, super::run_screen::Origin::Project) {
+                    self.project_return = Some(view);
+                } else {
+                    self.mode = Mode::Project(view);
+                }
+            }
             Outcome::Run(op) => self.project_run(op),
         }
     }
@@ -2513,6 +2633,35 @@ mod tests {
         assert_eq!(
             v.handle_key(&key(KeyCode::Char('5'))),
             Outcome::LoadThread(3)
+        );
+        // the Trace tab asks for the item's sessions; a run opens from it
+        assert_eq!(
+            v.handle_key(&key(KeyCode::Char('6'))),
+            Outcome::LoadTrace(3)
+        );
+        assert_eq!(v.handle_key(&key(KeyCode::Enter)), Outcome::None);
+        let run = |id: &str| crate::tracing::project_report::StepRun {
+            item: 3,
+            step: "build".into(),
+            attempt: 1,
+            run: id.into(),
+            started_ns: 0,
+            ended_ns: Some(1),
+            sessions: vec![],
+            tokens: None,
+            cost_usd: None,
+            unpriced: false,
+        };
+        v.trace = Some(ItemTrace {
+            number: 3,
+            report: Err("not read".into()),
+            runs: vec![run("run-a"), run("run-b")],
+            read_ns: 0,
+        });
+        v.handle_key(&key(KeyCode::Down));
+        assert_eq!(
+            v.handle_key(&key(KeyCode::Enter)),
+            Outcome::OpenRun("run-b".into())
         );
         v.handle_key(&key(KeyCode::Esc));
         assert_eq!(v.item.as_ref().unwrap().number, 1);

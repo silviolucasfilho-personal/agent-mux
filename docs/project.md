@@ -53,7 +53,9 @@ The left column holds the screens and, under them, the selected screen's rows. T
 | `P` | Merge: the pull requests of a Feature's Stories in order, or of one Story or Bug |
 | `t` `R` `D` | On a Bug: accept, reject, mark a duplicate |
 
-**The item screen** (`Enter` on an item) has five tabs: Card, Documents, Children, Pull requests and Thread. `Enter` opens what the cursor is on: a document on the default branch in the Markdown viewer (from the hub's checkout), a document still in review as its pull request in the browser, a child as its own item screen, a pull request in the browser. `Esc` goes back.
+**The item screen** (`Enter` on an item) has six tabs: Card, Documents, Children, Pull requests, Thread and Trace. `Enter` opens what the cursor is on: a document on the default branch in the Markdown viewer (from the hub's checkout), a document still in review as its pull request in the browser, a child as its own item screen, a pull request in the browser, a run of a step on the Run screen. `Esc` goes back.
+
+The **Trace** tab lists the runs of the item's steps, newest last, each with its sessions, tokens, cost and time; a Feature's tab includes the runs of its Stories and their Tasks. Under the list are the sessions of the selected run (work, review or critique, with the harness, turns and tools). `Enter` opens the run on the Run screen, and `Esc` there returns to the tab. It is read from the trace store each time the tab opens and on `Ctrl+R`; nothing is asked of GitHub.
 
 A `!` at the right of a row means the item waits on you. A `~` beside a stage means it was derived, because the issue is not on the board.
 
@@ -200,7 +202,14 @@ agent-mux trace project <n> --log      one line per session, oldest first
 agent-mux trace project <n> --json
 ```
 
-A Feature is read with its Stories and their Tasks. The hub is the one of the folder's `.spec-wave.json`; `--hub owner/repo` names another. Steps run before this version carry no tag and are not listed.
+A Feature is read with its Stories and their Tasks. The hub is the one of the folder's `.spec-wave.json`; `--hub owner/repo` names another. Steps run before sessions carried this record are not listed.
+
+The same trace is shown in four more places:
+
+- **The item's Trace tab** (above).
+- **History.** A past session a step started is marked with its item and step (`#412 build`) in the History list and on the History screen, where `p` lists only those sessions. `Enter` resumes one like any other, to ask it what it did.
+- **MCP.** `agent_mux_get_project_item` (`item`, and `hub` when the workspace is not the Project's) answers the report with its sessions grouped into runs, for a session or Heimdall.
+- **Langfuse.** With Langfuse configured, every turn of a step's session carries `session.id = <hub>#<n>` and the tags `project`, `project:<step>` and `milestone:<m>`, so a work item is one Langfuse session. After a build, a fix or a fix-pr finishes, agent-mux sends the item's **summary trace**: a span for the item and one per run (its sessions, tokens, cost and their trace ids). `agent-mux langfuse export-project <n> [--hub owner/repo] [--dry-run]` sends an item again, or for the first time when its steps ran with Langfuse off.
 
 ## 5. The next step
 
@@ -279,7 +288,7 @@ A read that fails never becomes a fact. A document whose listing failed is `unkn
 
 - A Feature built as a stack of Stories with its pull requests marked ready together, and a Story across several repositories.
 - QA and the dev-agent fleet (dispatch, slots, the lease).
-- An item's Trace tab, the History badge and the Observability screen: the sessions of an item are read with `agent-mux trace project` only.
+- The Observability screen, tokens and cost on an item's card, and a `projects` section in Heimdall's briefing.
 - Recording a Tech Leader's decision on a finding (`risk-accepted`).
 - Driving the repository's own Actions by trigger label instead of agent-mux's flows.
 - Editing an item's title, body, milestone or priority from agent-mux.

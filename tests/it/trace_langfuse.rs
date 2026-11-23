@@ -199,6 +199,7 @@ fn ctx() -> MapCtx {
         environment: Some("test".into()),
         tags: vec!["agent-mux".into()],
         swarms: Default::default(),
+        projects: Default::default(),
     }
 }
 
@@ -754,6 +755,7 @@ exit 0
         environment: None,
         tags: vec![],
         swarms: Default::default(),
+        projects: Default::default(),
     };
     let dry = replay_sessions(
         &conn,

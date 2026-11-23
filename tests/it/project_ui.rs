@@ -520,3 +520,107 @@ fn the_next_step_is_confirmed_then_started_as_its_own_process() {
     let said = std::fs::read_to_string(&started).unwrap();
     assert_eq!(said.lines().count(), 1, "a build was started: {said}");
 }
+
+#[test]
+fn the_trace_tab_reads_the_items_sessions_from_the_store() {
+    use agent_mux::project::ProjectLaunch;
+    use agent_mux::tracing::store::model::{LaunchRow, StoreOp};
+    let mut f = fixture();
+    // two sessions of one build of Story #2, and a session of no step
+    let mut store = agent_mux::tracing::store::open_rw(
+        &f.db,
+        agent_mux::tracing::store::OpenOptions::default(),
+    )
+    .unwrap();
+    let step = ProjectLaunch {
+        hub: "acme/hub".into(),
+        item: 2,
+        item_type: Some("Story".into()),
+        step: "build".into(),
+        attempt: 1,
+        executor: "operator".into(),
+        ..Default::default()
+    };
+    let row = |id: &str, at: i64, tag: Option<ProjectLaunch>| LaunchRow {
+        id: id.into(),
+        // the run the store opens with by default
+        run_id: "default-run".into(),
+        agent_mux_session: 1,
+        profile: "Claude Code".into(),
+        provider: "claude".into(),
+        cwd: "/proj".into(),
+        project_slug: "-proj".into(),
+        content_mode: "full".into(),
+        correlation_plan: "deterministic".into(),
+        correlation: None,
+        session_key: None,
+        injected_session_id: true,
+        attached: false,
+        started_ns: at,
+        ended_ns: Some(at + 5_000_000_000),
+        termination: None,
+        exit_code: None,
+        parse_errors: None,
+        dropped_ops: None,
+        reported_cost_usd: None,
+        reported_lines_added: None,
+        reported_lines_removed: None,
+        agent_mux_version: "test".into(),
+        user_id: None,
+        release: None,
+        environment: None,
+        tags: vec![],
+        metadata: Some(match tag {
+            Some(t) => serde_json::json!({ "project": t.metadata() }),
+            None => serde_json::json!({}),
+        }),
+    };
+    let t0 = 1_700_000_000_000_000_000i64;
+    let ops = [
+        StoreOp::Launch(row(
+            "L-work",
+            t0,
+            Some(step.for_session("wf-gone", "build")),
+        )),
+        StoreOp::Launch(row(
+            "L-review",
+            t0 + 10_000_000_000,
+            Some(step.for_session("wf-gone", "build/review")),
+        )),
+        StoreOp::Launch(row("L-plain", t0 + 20_000_000_000, None)),
+    ];
+    assert_eq!(store.apply(&ops).unwrap(), 0);
+    drop(store);
+
+    f.app.open_project();
+    wait(&mut f.app, "the read", |a| view(a).snap.is_some());
+    let Mode::Project(v) = &mut f.app.mode else {
+        panic!()
+    };
+    v.item = Some(agent_mux::app::project::ItemScreen {
+        number: 2,
+        tab: 0,
+        cursor: 0,
+        scroll: 0,
+        back: vec![],
+    });
+    f.app.handle_project_key(&key(KeyCode::Char('6')));
+    let trace = view(&f.app).trace.as_ref().expect("the trace was read");
+    assert_eq!(trace.number, 2);
+    assert_eq!(trace.runs.len(), 1);
+    assert_eq!(trace.report.as_ref().unwrap().launches.len(), 2);
+    let text = render(&f.app);
+    assert!(text.contains("2 session(s) in 1 run(s)"), "{text}");
+    assert!(text.contains("#2 build"), "{text}");
+    assert!(text.contains("run wf-gone"), "{text}");
+    assert!(text.contains("review · claude"), "{text}");
+
+    // the run's own rows are gone from this store: the screen stays, and says why
+    f.app.handle_project_key(&key(KeyCode::Enter));
+    assert!(matches!(f.app.mode, Mode::Project(_)), "{:?}", f.app.mode);
+    assert_eq!(view(&f.app).item.as_ref().unwrap().tab, 5);
+
+    // reading the trace asked GitHub for nothing new
+    let calls = std::fs::read_to_string(&f.calls).unwrap();
+    assert!(!calls.contains("issue view"), "{calls}");
+}
