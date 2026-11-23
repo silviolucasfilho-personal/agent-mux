@@ -288,6 +288,91 @@ pub struct FactoryConfig {
     pub ci_fix_max: Option<usize>,
 }
 
+/// `[project]` in the settings file: Projects (`docs/project.md`).
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct ProjectsConfig {
+    /// `[project.fleet]`.
+    pub fleet: Option<FleetConfig>,
+}
+
+/// `[project.fleet]` in the settings file: the fleet of a Project.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct FleetConfig {
+    /// Runs at once per Project (default 3).
+    pub max_runs: Option<usize>,
+    /// Failed runs after which a card is Blocked (default 3).
+    pub max_failures: Option<u32>,
+    /// How a Feature is delivered: `pr-stack` (default: one pull request
+    /// per Story) or `agent` (one branch and one pull request for the
+    /// Feature, as spec-wave's daemon does).
+    pub delivery: Option<String>,
+    /// Whether issues that carry `queue_label` are dispatched (default
+    /// false: a spec-wave-agent daemon on the same label would also start).
+    pub label: Option<bool>,
+    /// The queue label (default `spec-wave:dev-agent`).
+    pub queue_label: Option<String>,
+    /// Whether a dispatch another person addressed to this login, in a
+    /// comment on the issue, is taken (default true).
+    pub request: Option<bool>,
+}
+
+/// `[project.fleet]` resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetSettings {
+    pub max_runs: usize,
+    pub max_failures: u32,
+    /// One branch and one pull request for a whole Feature.
+    pub agent_delivery: bool,
+    pub label: bool,
+    pub queue_label: String,
+    pub request: bool,
+}
+
+impl Default for FleetSettings {
+    fn default() -> Self {
+        FleetSettings {
+            max_runs: 3,
+            max_failures: 3,
+            agent_delivery: false,
+            label: false,
+            queue_label: "spec-wave:dev-agent".into(),
+            request: true,
+        }
+    }
+}
+
+/// `Err` names a `delivery` that is neither of the two.
+pub fn resolve_fleet(cfg: Option<&ProjectsConfig>) -> Result<FleetSettings, String> {
+    let mut s = FleetSettings::default();
+    let Some(c) = cfg.and_then(|p| p.fleet.as_ref()) else {
+        return Ok(s);
+    };
+    // zero would stop the fleet without saying so: keep the default
+    if let Some(n) = c.max_runs.filter(|n| *n > 0) {
+        s.max_runs = n;
+    }
+    if let Some(n) = c.max_failures.filter(|n| *n > 0) {
+        s.max_failures = n;
+    }
+    match c.delivery.as_deref().map(str::trim) {
+        None | Some("") | Some("pr-stack") => {}
+        Some("agent") => s.agent_delivery = true,
+        Some(other) => {
+            return Err(format!(
+                "[project.fleet] delivery = {other:?}: use \"pr-stack\" or \"agent\""
+            ));
+        }
+    }
+    s.label = c.label.unwrap_or(false);
+    if let Some(l) = c.queue_label.as_deref().map(str::trim)
+        && !l.is_empty()
+    {
+        s.queue_label = l.to_string();
+    }
+    s.request = c.request.unwrap_or(true);
+    Ok(s)
+}
+
 /// `[factory]` resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactorySettings {
@@ -471,6 +556,9 @@ pub struct Config {
     /// The software factory (`[factory]`).
     #[serde(default)]
     pub factory: Option<FactoryConfig>,
+    /// Projects (`[project]`, `[project.fleet]`).
+    #[serde(default)]
+    pub project: Option<ProjectsConfig>,
     /// Whether the sidebar starts hidden (full-screen harness).
     #[serde(default)]
     pub hide_sidebar: bool,
@@ -926,6 +1014,7 @@ pub fn load() -> anyhow::Result<Config> {
         loops: None,
         workflows: None,
         factory: None,
+        project: None,
         hide_sidebar: false,
         clean: false,
         bypass_approvals: None,
@@ -956,6 +1045,7 @@ pub fn load_from_home(home: &Path) -> anyhow::Result<Config> {
         loops: None,
         workflows: None,
         factory: None,
+        project: None,
         hide_sidebar: false,
         clean: false,
         bypass_approvals: None,
@@ -974,6 +1064,34 @@ pub fn is_wsl_drive_mount(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_fleets_settings_have_defaults_and_refuse_an_unknown_delivery() {
+        let none = resolve_fleet(None).unwrap();
+        assert_eq!(
+            (
+                none.max_runs,
+                none.max_failures,
+                none.agent_delivery,
+                none.label,
+                none.request
+            ),
+            (3, 3, false, false, true)
+        );
+        assert_eq!(none.queue_label, "spec-wave:dev-agent");
+        let cfg = parse(
+            "[project.fleet]\nmax_runs = 5\nmax_failures = 0\ndelivery = \"agent\"\nlabel = true\nqueue_label = \"spec-wave:dev-agent-b\"\nrequest = false\n",
+        )
+        .unwrap();
+        let s = resolve_fleet(cfg.project.as_ref()).unwrap();
+        // zero failures would block a card before it ran: the default stands
+        assert_eq!((s.max_runs, s.max_failures), (5, 3));
+        assert!(s.agent_delivery && s.label && !s.request);
+        assert_eq!(s.queue_label, "spec-wave:dev-agent-b");
+        let bad = parse("[project.fleet]\ndelivery = \"squash\"\n").unwrap();
+        let e = resolve_fleet(bad.project.as_ref()).unwrap_err();
+        assert!(e.contains("\"squash\"") && e.contains("pr-stack"), "{e}");
+    }
+
     #[test]
     fn swarm_sessions_are_off_the_agents_sidebar_unless_asked() {
         let cfg = parse("").unwrap();

@@ -57,7 +57,21 @@ fn fx(run_exit: &str) -> Fx {
     std::fs::create_dir_all(root.join("bin")).unwrap();
     script(
         &root.join("bin/gh"),
-        "#!/bin/sh\ncase \"$1 $2\" in\n  \"api user\") echo ana ;;\n  *) echo \"unexpected: $*\" >&2; exit 2 ;;\nesac\n",
+        &format!(
+            r#"#!/bin/sh
+d='{}'
+printf '%s\n' "$*" >> "$d/gh-calls"
+case "$*" in
+  "api user"*) echo ana ;;
+  *"issues/12/events"*) printf 'spec-wave:dev-agent\t%s\n' "$(cat "$d/labeler" 2>/dev/null || echo carla)" ;;
+  *"collaborators/mallory/permission"*) echo read ;;
+  *"collaborators/"*"/permission"*) echo write ;;
+  *"issues/comments?since="*) cat "$d/comments" 2>/dev/null ;;
+  *) echo "unexpected: $*" >&2; exit 2 ;;
+esac
+"#,
+            root.display()
+        ),
     );
     script(
         &root.join("run"),
@@ -74,7 +88,7 @@ fn fx(run_exit: &str) -> Fx {
         title: "[STORY] Ver pedidos".into(),
         item_type: Some(ItemType::Story),
         open: true,
-        labels: vec![],
+        labels: vec!["spec-wave:dev-agent".into()],
         parent: None,
         children: vec![],
         depends_on: vec![],
@@ -269,5 +283,150 @@ fn an_item_another_machine_holds_is_not_started() {
     assert!(
         out.contains("#12 held by bia@elsewhere (generation 1)"),
         "{out}"
+    );
+}
+
+#[test]
+fn a_run_that_names_its_pull_request_puts_the_card_in_review() {
+    // a Feature's one pull request closes nothing, so only the run says it
+    let f =
+        fx("echo '  opened the draft pull request https://github.com/acme/hub/pull/40'\nexit 0");
+    std::fs::create_dir_all(f.root.join("home")).unwrap();
+    let (ok, out) = fleet_cmd(
+        &f,
+        &["fleet", "run", "--once", "--dispatch", "12", "--poll", "1"],
+    );
+    assert!(ok, "{out}");
+    let d = row(&f).unwrap();
+    assert_eq!(d.state, State::Review);
+    assert_eq!(
+        d.pr_url.as_deref(),
+        Some("https://github.com/acme/hub/pull/40")
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.root.join("runs"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn the_queue_label_dispatches_only_what_a_triager_labelled() {
+    // labelled by someone with no right to hand out work: nothing starts
+    let f = fx("exit 1");
+    std::fs::create_dir_all(f.root.join("home")).unwrap();
+    std::fs::write(f.root.join("labeler"), "mallory").unwrap();
+    let (ok, out) = fleet_cmd(&f, &["fleet", "run", "--once", "--label", "--poll", "1"]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("labelled `spec-wave:dev-agent` by mallory"),
+        "{out}"
+    );
+    assert!(row(&f).is_none());
+    assert!(!f.root.join("runs").exists());
+
+    // without --label the label is not read at all
+    let f = fx("exit 1");
+    std::fs::create_dir_all(f.root.join("home")).unwrap();
+    let (ok, out) = fleet_cmd(&f, &["fleet", "run", "--once", "--poll", "1"]);
+    assert!(ok, "{out}");
+    assert!(row(&f).is_none());
+    let calls = std::fs::read_to_string(f.root.join("gh-calls")).unwrap();
+    assert!(!calls.contains("events"), "{calls}");
+
+    // labelled by a collaborator: dispatched and run
+    let f = fx("exit 1");
+    std::fs::create_dir_all(f.root.join("home")).unwrap();
+    let (ok, out) = fleet_cmd(
+        &f,
+        &[
+            "fleet",
+            "run",
+            "--once",
+            "--label",
+            "--max-failures",
+            "1",
+            "--poll",
+            "1",
+        ],
+    );
+    assert!(ok, "{out}");
+    assert!(out.contains("#12: dispatched by the label"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(f.root.join("runs"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    assert_eq!(row(&f).unwrap().state, State::Blocked);
+}
+
+#[test]
+fn a_dispatch_addressed_to_this_login_is_taken_once() {
+    let f = fx("exit 1");
+    std::fs::create_dir_all(f.root.join("home")).unwrap();
+    // one for ana from a collaborator, one for someone else, one from a stranger
+    let comment = |id: u64, author: &str, to: &str| {
+        serde_json::json!({
+            "id": id, "author": author, "issue": 12,
+            "body": fleet::request_comment(to, None, false),
+        })
+        .to_string()
+    };
+    std::fs::write(
+        f.root.join("comments"),
+        format!(
+            "{}\n{}\n",
+            comment(1, "carla", "bia"),
+            comment(2, "mallory", "ana")
+        ),
+    )
+    .unwrap();
+    let (ok, out) = fleet_cmd(&f, &["fleet", "run", "--once", "--poll", "1"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("by mallory, who may not triage"), "{out}");
+    assert!(row(&f).is_none(), "{out}");
+
+    std::fs::write(
+        f.root.join("comments"),
+        format!("{}\n", comment(3, "carla", "Ana")),
+    )
+    .unwrap();
+    let (ok, out) = fleet_cmd(
+        &f,
+        &[
+            "fleet",
+            "run",
+            "--once",
+            "--max-failures",
+            "1",
+            "--poll",
+            "1",
+        ],
+    );
+    assert!(ok, "{out}");
+    assert!(out.contains("#12: dispatched to you by carla"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(f.root.join("runs"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    // the same comment, read again by the next look, is not taken twice
+    let (ok, _) = fleet_cmd(&f, &["cancel", "12"]);
+    assert!(ok);
+    let (ok, out) = fleet_cmd(&f, &["fleet", "run", "--once", "--poll", "1"]);
+    assert!(ok, "{out}");
+    assert!(row(&f).is_none(), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(f.root.join("runs"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
     );
 }

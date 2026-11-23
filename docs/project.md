@@ -244,6 +244,27 @@ agent-mux project cancel <n>                   back to Backlog; a run in progres
 
 One runner works a Project on a machine at a time: a second `fleet run` only queues what it was given and leaves. Moving a card on GitHub's board dispatches nothing.
 
+**Where work comes from.** Besides your own dispatch, the runner can take work from two places, checked at most once a minute:
+
+- **A request addressed to you** (on by default). `agent-mux project dispatch <n> --to <login>` hands an item to another developer: it writes a comment on the issue with a marker, and the card on your side reads "waiting for `<login>`". Their `fleet run` reads the hub's new comments, and takes a request addressed to their login when its author may triage the repository. `project cancel <n>` takes the request back with a second comment.
+- **spec-wave's queue label** (off by default). With `label = true`, an open Feature, Story, Task or Bug that carries `spec-wave:dev-agent` and has no card is dispatched, if the login that added the label may triage the repository. It is off by default because a `spec-wave-agent` daemon on the same label would start too; the lease lets only one of them run the item, but the other's start is wasted.
+
+**One branch for a Feature.** `delivery = "agent"` (or `--delivery agent` on `fleet run` and on `project run <feature>`) delivers a Feature the way spec-wave's daemon does: every Story is a checkpoint on one branch, `agent/issue-<n>`, each still reviewed before it is pushed, and the Feature gets one pull request after its last Story. That pull request names the Stories and closes nothing, since a merged Feature still has QA ahead. A Story that changes several repositories cannot be delivered this way.
+
+**Settings**, in agent-mux's `profiles.toml`; a flag of `fleet run` wins over them:
+
+```toml
+[project.fleet]
+max_runs = 3              # runs at once
+max_failures = 3          # failed runs before a card is Blocked
+delivery = "pr-stack"     # or "agent": one branch and one pull request per Feature
+label = false             # take issues that carry queue_label
+queue_label = "spec-wave:dev-agent"
+request = true            # take dispatches addressed to your login
+```
+
+Stopping a run (a cancel, a lost lease) ends its whole process group, so the sessions it started end with it.
+
 ### The workspace
 
 ```
@@ -338,10 +359,10 @@ agent-mux project triage duplicate <n> --of <original>
 agent-mux project advance [--yes]
 agent-mux project merge <n> [--yes] [--keep-branches] [--dry-run]
 agent-mux project workspace map|prepare --issue <n> [--json]
-agent-mux project dispatch <n> [--harness H]
+agent-mux project dispatch <n> [--harness H] [--to <login>]
 agent-mux project cancel <n>
 agent-mux project fleet status [--json]
-agent-mux project fleet run [--once] [--dispatch <n>] [--max-runs N] [--max-failures N] [--poll SECONDS]
+agent-mux project fleet run [--once] [--dispatch <n>] [--max-runs N] [--max-failures N] [--poll SECONDS] [--label] [--delivery pr-stack|agent]
 agent-mux project estimate <n> [--yes] [--discard] [--harness H] [--dry-run] [--json]
 agent-mux project refine <n> [--yes] [--discard] [--harness H] [--dry-run] [--json]
 agent-mux project run <n> [--step …] [--harness H] [--critic H] [--dry-run] [--apply] [--ignore-dependencies] [--keep-drafts]
@@ -377,7 +398,7 @@ A read that fails never becomes a fact. A document whose listing failed is `unkn
 
 - Closing the hub issue of a cross-repository Story when it reaches Done, and a Bug or a Task across several repositories.
 - QA.
-- In the fleet: dispatching to a named developer's machine, taking work from spec-wave's queue label, one branch and one pull request for a whole Feature (the daemon's delivery), a `[project.fleet]` section in agent-mux's settings (the limits are flags of `fleet run`), and stopping every process of a run when its lease is lost (the run's own process is stopped; a harness it started may outlive it for a moment).
+- In the fleet: dispatching to a named developer from the screens (the command does it), the extra tracks of spec-wave's queue label (`devAgent.queues`), and rounds inside a run.
 - The Observability screen, tokens and cost on an item's card, and a `projects` section in Heimdall's briefing.
 - Recording a Tech Leader's decision on a finding (`risk-accepted`).
 - Driving the repository's own Actions by trigger label instead of agent-mux's flows.

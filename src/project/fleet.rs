@@ -19,6 +19,8 @@ use crate::project::contract::STAGE_CODE_REVIEW;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
+/// The `target` of a dispatch this machine's fleet runs.
+pub const FLEET: &str = "fleet";
 /// Runs at once per Project (RFC-008's D6).
 pub const MAX_RUNS: usize = 3;
 /// Failed runs after which a card is Blocked.
@@ -124,7 +126,7 @@ impl Dispatch {
             hub: hub.to_string(),
             item,
             state: State::Queued,
-            target: "fleet".to_string(),
+            target: FLEET.to_string(),
             harness: harness.map(str::to_string),
             queued_ns: now_ns,
             started_ns: None,
@@ -139,6 +141,12 @@ impl Dispatch {
             log: None,
             updated_ns: now_ns,
         }
+    }
+
+    /// Whether this machine's fleet runs it; else it was handed to the
+    /// developer `target` names, whose own agent-mux takes it.
+    pub fn for_fleet(&self) -> bool {
+        self.target == FLEET
     }
 
     pub fn column(&self) -> Column {
@@ -169,6 +177,11 @@ impl Dispatch {
             String::new()
         };
         match self.state {
+            State::Queued if !self.for_fleet() => format!(
+                "waiting for {} for {}",
+                self.target,
+                ago(Some(self.queued_ns))
+            ),
             State::Queued => format!(
                 "waiting for a slot for {}{}{tried}",
                 ago(Some(self.queued_ns)),
@@ -374,6 +387,9 @@ pub struct Card {
     pub failures: u32,
     /// The run's process is there (a running row only).
     pub alive: bool,
+    /// This machine's fleet runs it; a row handed to a named developer is
+    /// never started here.
+    pub fleet: bool,
     /// The item is closed, or gone from the Project.
     pub gone: bool,
     /// It has an open pull request and is in code review or further on.
@@ -408,6 +424,7 @@ pub fn cards(dispatches: &[Dispatch], snap: &Snapshot, alive: impl Fn(u32) -> bo
                 queued_ns: d.queued_ns,
                 failures: d.failures,
                 alive: d.pid.is_some_and(&alive),
+                fleet: d.for_fleet(),
                 gone: it.is_none_or(|i| !i.open),
                 in_review: it.and_then(|i| {
                     let open = i.pulls.iter().find(|p| p.open())?;
@@ -454,7 +471,7 @@ pub fn next_actions(cards: &[Card], max_runs: usize) -> Vec<Action> {
     // the queue: Bugs first, then by when they were dispatched
     let mut queue: Vec<&Card> = cards
         .iter()
-        .filter(|c| c.state == State::Queued && !c.gone && c.in_review.is_none())
+        .filter(|c| c.state == State::Queued && c.fleet && !c.gone && c.in_review.is_none())
         .collect();
     queue.sort_by(|a, b| {
         b.bug
@@ -466,6 +483,92 @@ pub fn next_actions(cards: &[Card], max_runs: usize) -> Vec<Action> {
         out.push(Action::Start(c.item));
     }
     out
+}
+
+// ------------------------------------------------------------- the sources
+
+/// The open items that carry the queue label (or one of its extra tracks,
+/// `<label>-b`, `<label>-c`, …, when `tracks` is on) and have no card
+/// yet: what the `label` source would dispatch, once the login that added
+/// the label is checked. Pure.
+pub fn labelled(snap: &Snapshot, dispatches: &[Dispatch], label: &str) -> Vec<u64> {
+    let mut out: Vec<u64> = snap
+        .items
+        .iter()
+        .filter(|i| i.open)
+        .filter(|i| {
+            matches!(
+                i.item_type,
+                Some(ItemType::Feature | ItemType::Story | ItemType::Bug | ItemType::Task)
+            )
+        })
+        .filter(|i| i.labels.iter().any(|l| l.eq_ignore_ascii_case(label)))
+        .filter(|i| !dispatches.iter().any(|d| d.item == i.number))
+        .map(|i| i.number)
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+/// The marker of a dispatch addressed to a named developer, in a comment
+/// on the issue. The named developer's agent-mux reads it.
+pub const REQUEST_MARKER: &str = "agent-mux:dispatch";
+
+/// A request read from a comment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Request {
+    /// The login it is addressed to, without the `@`.
+    pub to: String,
+    pub harness: Option<String>,
+    /// The request is taken back.
+    pub cancel: bool,
+}
+
+/// The comment that asks `to` to run an item, or takes the request back.
+/// The marker is what is read; the sentence is for people.
+pub fn request_comment(to: &str, harness: Option<&str>, cancel: bool) -> String {
+    let to = to.trim_start_matches('@');
+    let extra = harness.map(|h| format!(" harness={h}")).unwrap_or_default();
+    if cancel {
+        format!(
+            "<!-- {REQUEST_MARKER} to={to} cancel -->\n↩️ The dispatch of this item to @{to} was taken back."
+        )
+    } else {
+        format!(
+            "<!-- {REQUEST_MARKER} to={to}{extra} -->\n🚚 Dispatched to @{to}: their agent-mux fleet takes this item when it next looks (`agent-mux project fleet run`)."
+        )
+    }
+}
+
+/// The request a comment carries, when it carries one. A login or a
+/// harness with anything but the characters GitHub and agent-mux allow is
+/// not a request.
+pub fn parse_request(body: &str) -> Option<Request> {
+    let at = body.find(&format!("<!-- {REQUEST_MARKER} "))?;
+    let rest = &body[at + 5 + REQUEST_MARKER.len()..];
+    let inner = rest[..rest.find("-->")?].trim();
+    let safe = |v: &str| {
+        !v.is_empty()
+            && v.len() <= 64
+            && v.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    };
+    let mut to = None;
+    let mut harness = None;
+    let mut cancel = false;
+    for word in inner.split_whitespace() {
+        match word.split_once('=') {
+            Some(("to", v)) if safe(v) => to = Some(v.to_string()),
+            Some(("harness", v)) if safe(v) => harness = Some(v.to_string()),
+            None if word == "cancel" => cancel = true,
+            _ => return None,
+        }
+    }
+    Some(Request {
+        to: to?,
+        harness,
+        cancel,
+    })
 }
 
 /// A run that ended, as the row records it. `ok` with a pull request is
@@ -603,6 +706,7 @@ mod tests {
             queued_ns,
             failures: 0,
             alive: false,
+            fleet: true,
             gone: false,
             in_review: None,
         }
@@ -735,6 +839,80 @@ mod tests {
         );
         // the two live runs are the only slots: nothing starts
         assert!(!next_actions(&cards, 2).contains(&Action::Start(9)));
+    }
+
+    #[test]
+    fn a_row_handed_to_a_named_developer_is_never_started_here() {
+        let mut theirs = card(12, State::Queued, 1);
+        theirs.fleet = false;
+        let cards = vec![theirs, card(13, State::Queued, 2)];
+        assert_eq!(next_actions(&cards, 3), vec![Action::Start(13)]);
+        let mut d = Dispatch::queued("acme/hub", 12, None, 0);
+        d.target = "bia".into();
+        assert!(!d.for_fleet());
+        assert_eq!(d.column(), Column::Wip);
+        assert_eq!(d.line(120 * 1_000_000_000), "waiting for bia for 2m");
+    }
+
+    #[test]
+    fn the_queue_label_names_what_has_no_card_yet() {
+        let labelled_item =
+            |n: u64, title: &str, labels: &[&str]| staged(item(n, title, labels), STAGE_READY);
+        let mut closed = labelled_item(15, "[STORY] e", &["spec-wave:dev-agent"]);
+        closed.open = false;
+        let s = snap(vec![
+            labelled_item(12, "[STORY] a", &["spec-wave:dev-agent"]),
+            labelled_item(11, "[BUG] b", &["Spec-Wave:Dev-Agent"]),
+            labelled_item(13, "[STORY] c", &["spec-wave:dev-agent-b"]),
+            labelled_item(14, "[STORY] d", &[]),
+            closed,
+            labelled_item(16, "[EPIC] f", &["spec-wave:dev-agent"]),
+            labelled_item(17, "[STORY] g", &["spec-wave:dev-agent"]),
+        ]);
+        let ds = vec![Dispatch::queued("acme/hub", 17, None, 0)];
+        // the label's own track only, open, of a type the fleet runs, with no card
+        assert_eq!(labelled(&s, &ds, "spec-wave:dev-agent"), vec![11, 12]);
+        assert_eq!(labelled(&s, &ds, "spec-wave:dev-agent-b"), vec![13]);
+    }
+
+    #[test]
+    fn a_request_is_a_marker_in_a_comment() {
+        let text = request_comment("@bia", Some("codex"), false);
+        assert!(
+            text.starts_with("<!-- agent-mux:dispatch to=bia harness=codex -->\n"),
+            "{text}"
+        );
+        assert!(text.contains("Dispatched to @bia"));
+        assert_eq!(
+            parse_request(&text),
+            Some(Request {
+                to: "bia".into(),
+                harness: Some("codex".into()),
+                cancel: false
+            })
+        );
+        let back = request_comment("bia", None, true);
+        assert_eq!(
+            parse_request(&back),
+            Some(Request {
+                to: "bia".into(),
+                harness: None,
+                cancel: true
+            })
+        );
+        // a marker inside a longer comment is read; what is not one is not
+        assert!(parse_request("ok\n\n<!-- agent-mux:dispatch to=ana-2 -->").is_some());
+        for not in [
+            "dispatch this to bia please",
+            "<!-- agent-mux:dispatch -->",
+            "<!-- agent-mux:dispatch to= -->",
+            "<!-- agent-mux:dispatch to=bia;rm -->",
+            "<!-- agent-mux:dispatch to=bia run=now -->",
+            "<!-- agent-mux:dispatch to=bia",
+            "<!-- spec-wave:critique kind=plan -->",
+        ] {
+            assert_eq!(parse_request(not), None, "{not}");
+        }
     }
 
     #[test]

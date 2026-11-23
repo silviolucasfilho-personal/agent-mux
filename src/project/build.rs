@@ -1095,6 +1095,11 @@ pub struct Build {
     pub story: Option<u64>,
     /// Set when the Story changes several repositories: which one this is.
     pub part: Option<Part>,
+    /// The remote's default branch, which is never pushed to.
+    pub default_branch: String,
+    /// Set when the Feature is delivered on one branch with one pull
+    /// request (the fleet's `agent` delivery).
+    pub agent: Option<AgentDelivery>,
     pub branch: String,
     pub prefix: &'static str,
     pub tasks: Vec<IssueText>,
@@ -1102,6 +1107,91 @@ pub struct Build {
     pub args: Value,
     /// Lines the operator should read before the session starts.
     pub notes: Vec<String>,
+}
+
+/// One Story of a Feature delivered the way spec-wave's daemon delivers
+/// it (spec §8.2): every Story is a checkpoint on one branch,
+/// `agent/issue-<feature>`, and the Feature gets one pull request, opened
+/// after the last Story, with no closing keyword: a merge does not end a
+/// Feature, which still has QA ahead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentDelivery {
+    pub feature: u64,
+    pub feature_title: String,
+    /// The Stories of this delivery, in order.
+    pub stories: Vec<u64>,
+    /// This Story is the last: the pull request is opened after it.
+    pub last: bool,
+}
+
+/// The one branch of a Feature's `agent` delivery.
+pub fn agent_branch(feature: u64) -> String {
+    format!("agent/issue-{feature}")
+}
+
+/// Turns a Story's planned build into a checkpoint of its Feature's one
+/// branch. `on_remote`: the branch is there already, so the work forks
+/// from it; else from the default branch.
+pub fn as_checkpoint(
+    b: &mut Build,
+    delivery: AgentDelivery,
+    on_remote: bool,
+) -> Result<(), String> {
+    if b.part.is_some() {
+        return Err(format!(
+            "#{} changes several repositories: the `agent` delivery puts a Feature on one branch of one repository. Use the `pr-stack` delivery",
+            b.number
+        ));
+    }
+    let branch = agent_branch(delivery.feature);
+    b.base = if on_remote {
+        branch.clone()
+    } else {
+        b.default_branch.clone()
+    };
+    b.branch = branch;
+    b.prefix = "agent/";
+    b.stacked_on = None;
+    b.under = Vec::new();
+    // the pull request is one, opened once: nothing to mark ready per Story
+    b.feature = None;
+    b.notes.retain(|n| !n.starts_with("stacked on"));
+    b.notes.push(format!(
+        "a checkpoint of Feature #{} on `{}`{}",
+        delivery.feature,
+        b.branch,
+        if delivery.last {
+            ": the last Story, so the Feature's one pull request is opened after it"
+        } else {
+            ""
+        }
+    ));
+    b.agent = Some(delivery);
+    Ok(())
+}
+
+/// The description of a Feature's one pull request: what it holds, and no
+/// closing keyword.
+pub fn agent_pr_body(d: &AgentDelivery, hub: &str) -> String {
+    let mut l = vec![
+        format!(
+            "Feature do spec-wave: {} ({})",
+            strip_tag(&d.feature_title),
+            closes_ref(hub, d.feature)
+        ),
+        String::new(),
+        "Entrega do agent-mux num único branch, um commit de checkpoint por Story:".to_string(),
+        String::new(),
+    ];
+    for n in &d.stories {
+        l.push(format!("- {}", closes_ref(hub, *n)));
+    }
+    l.push(String::new());
+    l.push(
+        "Este Pull Request não fecha a Feature ao ser mergeado: ela ainda passa por QA."
+            .to_string(),
+    );
+    l.join("\n")
 }
 
 /// The branch a Story's or a Bug's code is delivered on.
@@ -1204,6 +1294,7 @@ impl<'a> Ctx<'a> {
         };
         check_checkout(&target)?;
         let default = factory::default_branch(&target.dir)?;
+        let default_branch = default.clone();
         // a Story is stacked on the Story before it, in its Feature's
         // order, that has an open pull request in the same repository
         let above = match kind {
@@ -1391,6 +1482,8 @@ impl<'a> Ctx<'a> {
                 _ => None,
             },
             part,
+            default_branch,
+            agent: None,
             branch,
             prefix,
             tasks,
@@ -1398,6 +1491,65 @@ impl<'a> Ctx<'a> {
             args,
             notes,
         })))
+    }
+
+    /// After a checkpoint of a Feature's one branch was pushed: the board
+    /// of the Story, and after the last Story the Feature's one pull
+    /// request.
+    fn checkpoint_finish(
+        &self,
+        b: &Build,
+        d: &AgentDelivery,
+        hub: &str,
+        snap: &Snapshot,
+        cycles: i64,
+        mut r: Report,
+    ) -> Result<Report, String> {
+        let moved = self.ops(snap).build_board(true, b.number);
+        r.lines.extend(moved.lines);
+        for n in moved.touched {
+            r.touch(n);
+        }
+        r.touch(b.number);
+        let mut note = format!(
+            "🚧 **Implementação entregue** como checkpoint da Feature #{} no branch `{}` em `{}`.\n\nUma sessão independente revisou o diff e aprovou após {} ciclo(s).",
+            d.feature,
+            b.branch,
+            b.target.repo.slug(),
+            cycles.max(1)
+        );
+        if d.last {
+            let url = factory::open_pr(
+                self.tools,
+                &b.target.dir,
+                &b.default_branch,
+                &b.branch,
+                strip_tag(&d.feature_title),
+                &agent_pr_body(d, hub),
+            )
+            .map_err(|e| {
+                format!(
+                    "the branch `{}` is on {} with every Story, but the Feature's pull request was not opened: {e}. Open it by hand, with no closing keyword",
+                    b.branch,
+                    b.target.repo.slug()
+                )
+            })?;
+            r.say(format!("{OPENED_PR}{url}"));
+            r.touch(d.feature);
+            note.push_str(&format!(
+                " O Pull Request da Feature: {url} (rascunho). Falta a revisão de uma pessoa."
+            ));
+        } else {
+            r.say(format!(
+                "checkpoint of Feature #{}: its pull request is opened after the last Story",
+                d.feature
+            ));
+        }
+        match write::comment(self.tools, self.cfg, b.number, &note) {
+            Ok(()) => r.say("commented on the issue"),
+            Err(e) => r.say(format!("! the issue was not commented: {e}")),
+        }
+        Ok(r)
     }
 
     fn ops(&self, snap: &Snapshot) -> Ops<'a> {
@@ -1506,10 +1658,20 @@ impl<'a> Ctx<'a> {
                 ));
             }
         }
-        factory::push(wt, b.prefix, &b.branch, &b.base).map_err(|e| format!("{e}.{at}"))?;
+        // the default branch is the one a push never reaches, whatever the
+        // work forked from
+        let never = if b.default_branch.is_empty() {
+            &b.base
+        } else {
+            &b.default_branch
+        };
+        factory::push(wt, b.prefix, &b.branch, never).map_err(|e| format!("{e}.{at}"))?;
         r.say(format!("pushed `{}` to {}", b.branch, b.target.repo.slug()));
         let work = result.get("work").cloned().unwrap_or(Value::Null);
         let hub = self.cfg.hub_repo().slug();
+        if let Some(d) = &b.agent {
+            return self.checkpoint_finish(b, d, &hub, snap, s.cycles, r);
+        }
         let body = pr_body(b, &hub, &work, &review, s.cycles);
         let url = factory::open_pr(
             self.tools,
@@ -2411,6 +2573,8 @@ mod tests {
                     keep_drafts: false,
                     story: None,
                     part: None,
+                    default_branch: "main".into(),
+                    agent: None,
                     branch: "story/12-ver-pedidos".into(),
                     prefix: "story/",
                     tasks: vec![IssueText {
@@ -2773,6 +2937,106 @@ mod tests {
                 calls.iter().any(|c| c.starts_with("pr ready 40")),
                 "{calls:?}"
             );
+        }
+
+        #[test]
+        fn a_feature_on_one_branch_gets_checkpoints_and_one_pull_request() {
+            let delivery = |last: bool| AgentDelivery {
+                feature: 30,
+                feature_title: "[FEATURE] Pedidos".into(),
+                stories: vec![12, 15],
+                last,
+            };
+            // the first Story: a checkpoint, and no pull request yet
+            let f = fx("feat: pedidos");
+            let mut b = f.build();
+            as_checkpoint(&mut b, delivery(false), false).unwrap();
+            assert_eq!(
+                (b.base.as_str(), b.branch.as_str(), b.prefix),
+                ("main", "agent/issue-30", "agent/")
+            );
+            let r = f
+                .ctx()
+                .build_finish(&b, &approved(true), Some(&f.wt), &Snapshot::default())
+                .unwrap();
+            assert!(f.remote_branches().contains("refs/heads/agent/issue-30"));
+            assert!(!f.remote_branches().contains("story/"));
+            let calls = f.calls();
+            assert!(
+                !calls.iter().any(|c| c.starts_with("pr create")),
+                "{calls:?}"
+            );
+            // the Story's board moves as in any build, and the issue is told
+            assert!(
+                calls
+                    .iter()
+                    .any(|c| c.contains("itemId=PVTI_12") && c.contains("optionId=o_review")),
+                "{calls:?}"
+            );
+            let note = calls
+                .iter()
+                .find(|c| c.starts_with("issue comment 12"))
+                .unwrap();
+            assert!(note.contains("checkpoint da Feature #30"), "{note}");
+            assert!(
+                r.lines
+                    .iter()
+                    .any(|l| l.contains("checkpoint of Feature #30")),
+                "{:?}",
+                r.lines
+            );
+            assert!(!r.lines.iter().any(|l| l.starts_with(OPENED_PR)));
+
+            // the last Story: the Feature's one pull request, closing nothing
+            let f = fx("feat: filtro");
+            let mut b = f.build();
+            as_checkpoint(&mut b, delivery(true), false).unwrap();
+            let r = f
+                .ctx()
+                .build_finish(&b, &approved(true), Some(&f.wt), &Snapshot::default())
+                .unwrap();
+            let calls = f.calls();
+            let pr = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
+            assert!(
+                pr.contains("--draft --base main --head agent/issue-30 --title Pedidos"),
+                "{pr}"
+            );
+            assert!(
+                pr.contains("acme/hub#12") && pr.contains("acme/hub#15"),
+                "{pr}"
+            );
+            for word in ["Closes", "Fixes", "Resolves", "closes", "fixes"] {
+                assert!(
+                    !pr.contains(word),
+                    "the pull request must close nothing: {pr}"
+                );
+            }
+            assert!(
+                r.lines.iter().any(|l| l.starts_with(OPENED_PR)),
+                "{:?}",
+                r.lines
+            );
+            assert!(
+                !calls.iter().any(|c| c.starts_with("pr ready")),
+                "{calls:?}"
+            );
+
+            // a branch that is there is what the next Story forks from
+            let mut b = f.build();
+            as_checkpoint(&mut b, delivery(false), true).unwrap();
+            assert_eq!(b.base, "agent/issue-30");
+            // and a Story across repositories has no one branch
+            let mut b = Build {
+                part: Some(Part {
+                    index: 1,
+                    total: 2,
+                    others: vec!["acme/web".into()],
+                    delivered: vec![],
+                }),
+                ..f.build()
+            };
+            let e = as_checkpoint(&mut b, delivery(false), false).unwrap_err();
+            assert!(e.contains("several repositories"), "{e}");
         }
 
         #[test]
