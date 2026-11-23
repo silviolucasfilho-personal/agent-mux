@@ -34,6 +34,7 @@ pub mod ops;
 pub mod order;
 pub mod run;
 pub mod snapshot;
+pub mod stack;
 pub mod stage;
 pub mod store;
 pub mod write;

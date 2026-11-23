@@ -20,6 +20,7 @@ You have no stake in this change. Review it as if a colleague you never met subm
    1. **Correctness**: does the change do what the work item asks? Walk the logic in the diff.
    2. **Acceptance criteria**: every line of `args.criteria`, one by one, pass or fail with evidence.
    3. **Story:** every Task of the context is implemented, none skipped or half done. **Bug:** the regression test fails without the fix and for the reported reason; the fix is at the root cause, not where the symptom shows. **fix-pr:** `worktree_base` is the pull request's branch as it was, so the diff is only the fixes; each criterion is one review comment, and it passes when the code now does what the comment asks, or when the report's `declined` gives a reason that holds. A fix that goes beyond its comment is a scope finding.
+      **A session of one repository:** when the context has a section `Repositório desta sessão`, judge only what belongs to the repository of this worktree. A criterion or a Task that belongs wholly to another repository passes here, with the evidence `fora deste repositório (<repositório>)`; one that is partly this repository's is judged on its part.
    4. **Safety**: bugs, unhandled edge cases, error paths, security (injection, missing authorization, secrets in code), data loss.
    5. **Scope**: unrelated changes, deviations the report did not declare, pieces the context required and the diff lacks.
    6. **Verification**: was the testing enough for the change's risk?

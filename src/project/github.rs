@@ -500,7 +500,7 @@ pub fn fetch(tools: &Tools, cfg: &ProjectConfig) -> Result<Raw, String> {
     })
 }
 
-fn pull_list(
+pub(crate) fn pull_list(
     tools: &Tools,
     cwd: &Path,
     repo: &str,

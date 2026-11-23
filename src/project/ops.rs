@@ -674,6 +674,11 @@ impl<'a> Ops<'a> {
         for t in &tasks {
             step(t, STAGE_DONE, STATUS_DONE, false);
         }
+        // a Task built on its own ends where a Story's Tasks do
+        if item.item_type == Some(ItemType::Task) {
+            step(&item, STAGE_DONE, STATUS_DONE, false);
+            return r;
+        }
         step(&item, STAGE_CODE_REVIEW, STATUS_TODO, false);
         if let Some(f) = &feature {
             let others: Vec<u64> = f

@@ -39,6 +39,8 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// How a delivery's report names the pull request it opened.
+pub const OPENED_PR: &str = "opened the draft pull request ";
 pub const FLOW_STORY: &str = "project-story";
 pub const FLOW_BUG_FIX: &str = "project-bug-fix";
 
@@ -293,6 +295,65 @@ pub fn target_repo(hub_root: &Path, cfg: &ProjectConfig, item: &Item) -> Result<
     }
 }
 
+/// Every repository an item changes, in the order of its `repo:<slug>`
+/// labels; with no label, the hub.
+pub fn targets(hub_root: &Path, cfg: &ProjectConfig, item: &Item) -> Result<Vec<RepoDir>, String> {
+    if item.repos.len() < 2 {
+        return target_repo(hub_root, cfg, item).map(|t| vec![t]);
+    }
+    item.repos
+        .iter()
+        .map(|slug| repo_dir(hub_root, cfg, slug))
+        .collect()
+}
+
+/// One repository of a Story that changes several (spec §7.3): each is
+/// built by a run of its own and gets its own pull request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Part {
+    /// This repository's place among the Story's, from 1.
+    pub index: usize,
+    pub total: usize,
+    /// The Story's other repositories, as `owner/repo`.
+    pub others: Vec<String>,
+    /// The ones delivered already, with the pull request's branch.
+    pub delivered: Vec<(String, String)>,
+}
+
+impl Part {
+    pub fn last(&self) -> bool {
+        self.delivered.len() + 1 >= self.total
+    }
+}
+
+/// What a session of one repository of a cross-repository Story is told.
+pub fn part_note(repo: &str, part: &Part) -> String {
+    let mut l = vec![
+        format!(
+            "## Repositório desta sessão: `{repo}` ({} de {})",
+            part.index, part.total
+        ),
+        String::new(),
+        format!(
+            "Esta Story toca {} repositórios: `{repo}`, {}. Cada um é implementado numa sessão própria, com o seu Pull Request.",
+            part.total,
+            part.others
+                .iter()
+                .map(|o| format!("`{o}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        String::new(),
+        format!("- Implemente **somente** o que pertence a `{repo}`. Não altere nem clone os outros repositórios."),
+        "- Uma Task ou um critério de aceite que pertence **inteiramente** a outro repositório não se aplica a esta sessão: registre-o como atendido, com a evidência `fora deste repositório (<repositório>)`.".to_string(),
+        "- O que depende de um contrato entre os repositórios (uma rota, um formato) segue o que os documentos e os comentários dizem; não invente o lado que não está aqui.".to_string(),
+    ];
+    for (r, branch) in &part.delivered {
+        l.push(format!("- Já entregue: `{r}`, no branch `{branch}`."));
+    }
+    l.join("\n")
+}
+
 // ---------------------------------------------------------------- contexts
 
 /// An issue's text as a context shows it.
@@ -377,6 +438,8 @@ pub struct StoryInput<'a> {
     pub comments: &'a [CommentGroup],
     pub spec: Option<(String, String)>,
     pub plan: Option<(String, String)>,
+    /// The section of a cross-repository Story's session (`part_note`).
+    pub part: Option<String>,
 }
 
 /// spec-wave's `buildContext` for a Story, with the delivery left to
@@ -428,6 +491,10 @@ pub fn story_context(i: &StoryInput) -> String {
     }
     l.push("   ```".into());
     l.push(format!("3. {DELIVERY_RULE}"));
+    if let Some(part) = &i.part {
+        l.push(String::new());
+        l.push(part.clone());
+    }
     l.push(String::new());
     l.push(format!(
         "## Tasks a implementar — NESTA ORDEM ({})",
@@ -439,6 +506,81 @@ pub fn story_context(i: &StoryInput) -> String {
         if !t.body.trim().is_empty() {
             l.push(t.body.trim().to_string());
         }
+    }
+    push_comments(
+        &mut l,
+        "## Comentários das issues (revisões e correções)",
+        "> Comentários frequentemente **corrigem ou substituem** instruções dos documentos acima — em caso de conflito, o comentário mais recente prevalece.",
+        i.comments,
+    );
+    for (name, doc) in [("spec.md", &i.spec), ("plan.md", &i.plan)] {
+        if let Some((path, text)) = doc {
+            l.push(String::new());
+            l.push(format!("## {name} ({path})"));
+            l.push(text.trim().to_string());
+        }
+    }
+    l.push(String::new());
+    l.join("\n")
+}
+
+/// What the sessions of a Task built on its own read.
+#[derive(Debug, Clone, Default)]
+pub struct TaskInput<'a> {
+    pub task: IssueText,
+    /// The Story above it: number, title and text.
+    pub story: Option<IssueText>,
+    pub feature: Option<(u64, String)>,
+    pub comments: &'a [CommentGroup],
+    pub spec: Option<(String, String)>,
+    pub plan: Option<(String, String)>,
+}
+
+/// spec-wave's `buildContext` for a single Task, with the delivery left
+/// to agent-mux. The Story is there to say what the Task is part of, not
+/// to be built.
+pub fn task_context(i: &TaskInput) -> String {
+    let n = i.task.number;
+    let mut l: Vec<String> = vec![
+        format!("# Contexto de implementação — Task #{n}"),
+        String::new(),
+        format!("**Task:** {}", i.task.title),
+    ];
+    if let Some(s) = &i.story {
+        l.push(format!("**Story:** #{} — {}", s.number, s.title));
+    }
+    if let Some((f, title)) = &i.feature {
+        l.push(format!("**Feature:** #{f} — {title}"));
+    }
+    if !i.task.body.trim().is_empty() {
+        l.push(String::new());
+        l.push(i.task.body.trim().to_string());
+    }
+    l.push(String::new());
+    l.push("## Instruções de execução (uma única Task)".into());
+    l.push(String::new());
+    l.push(format!(
+        "> **O board é atualizado pelo agent-mux**: no início, a Task vai para {STAGE_DEVELOPMENT} ({STATUS_IN_PROGRESS}); na conclusão, para {STAGE_DONE}. Você NÃO move cards e NÃO edita issues."
+    ));
+    l.push(String::new());
+    l.push(format!(
+        "1. Implemente **somente** a Task #{n}, por completo, com seus testes. As outras Tasks da Story não fazem parte desta sessão: não as implemente nem as adiante."
+    ));
+    l.push("2. **Ao concluir**, faça o **commit** de todas as mudanças. O assunto é livre — inclua estes `git trailer`(s) no **rodapé** (após uma linha em branco), literalmente assim, sem alterar as chaves:".into());
+    l.push("   ```".into());
+    for line in trailers(i.story.as_ref().map(|s| s.number), &[n], None).lines() {
+        l.push(format!("   {line}"));
+    }
+    l.push("   ```".into());
+    l.push(format!("3. {DELIVERY_RULE}"));
+    if let Some(s) = i.story.as_ref().filter(|s| !s.body.trim().is_empty()) {
+        l.push(String::new());
+        l.push(format!(
+            "## A Story #{} (contexto — NÃO a implemente inteira)",
+            s.number
+        ));
+        l.push(String::new());
+        l.push(s.body.trim().to_string());
     }
     push_comments(
         &mut l,
@@ -654,11 +796,14 @@ fn block(
     })
 }
 
-/// A dependency whose code is on the default branch: closed, or merged
-/// and so in QA or later. One still in review is not: this build forks
-/// from the default branch and would not have its code.
+/// A dependency whose code exists: closed, merged and so in QA or later,
+/// or on an open pull request, which the build stacks on (`stack::base_for`;
+/// `check_stack` verifies that its branch is under what the build forks
+/// from).
 fn dependency_met(dep: &Item) -> bool {
-    !dep.open || stage::at_or_past(dep.stage.as_deref(), STAGE_QA)
+    !dep.open
+        || stage::at_or_past(dep.stage.as_deref(), STAGE_QA)
+        || dep.pulls.iter().any(|p| p.open())
 }
 
 /// The dependencies of an item that are not met, as lines.
@@ -688,7 +833,16 @@ pub fn decision(item: &Item, snap: &Snapshot, ignore_dependencies: bool) -> Opti
     let n = item.number;
     let shown = stage::shown(item).stage;
     let plain = stage_plain(&shown).to_string();
-    let open_pull = item.pulls.iter().find(|p| p.open());
+    // a Story across repositories has one pull request in each: it is in
+    // review once every one of them has its own
+    let with_pull: std::collections::BTreeSet<String> = item
+        .pulls
+        .iter()
+        .filter(|p| p.open() || p.merged())
+        .map(|p| p.repo.to_lowercase())
+        .collect();
+    let part_done = item.repos.len() > 1 && with_pull.len() < item.repos.len();
+    let open_pull = item.pulls.iter().find(|p| p.open()).filter(|_| !part_done);
     let in_review = |what: &str| {
         decided(
             Action::None,
@@ -719,13 +873,13 @@ pub fn decision(item: &Item, snap: &Snapshot, ignore_dependencies: bool) -> Opti
             return decided(
                 Action::Implement,
                 format!(
-                    "It depends on work that is not merged: {}.",
+                    "It depends on work that has no code yet: {}.",
                     pending.join("; ")
                 ),
                 block(
                     "dependency-pending",
-                    "The build forks from the default branch, which does not have that code yet.",
-                    "Merge the dependencies first, or run with --ignore-dependencies.",
+                    "A build forks from the default branch or from the pull request of the Story before it, and neither has that code.",
+                    "Build the dependencies first (running the Feature builds its Stories in order), or run with --ignore-dependencies.",
                 ),
             );
         }
@@ -761,21 +915,53 @@ pub fn decision(item: &Item, snap: &Snapshot, ignore_dependencies: bool) -> Opti
                 },
             ))
         }
-        ItemType::Task => Some(decided(
-            Action::Implement,
-            match item.parent {
-                Some(p) => format!("A Task is built with its Story: #{p}."),
-                None => "A Task is built with its Story, and this one has no parent.".to_string(),
-            },
-            block(
-                "with-story",
-                "agent-mux builds a Story with all its Tasks, one pull request per Story.",
+        ItemType::Task => {
+            if stage::at_or_past(Some(&shown), STAGE_DONE) {
+                return Some(decided(Action::None, format!("Task #{n} is done."), None));
+            }
+            if !stage::at_or_past(Some(&shown), STAGE_READY) {
+                return Some(decided(
+                    Action::Implement,
+                    format!("Task #{n} is in {plain}, before Ready."),
+                    block(
+                        "not-ready",
+                        "A Task is built once it is Ready.",
+                        "Move it to Ready when it is.",
+                    ),
+                ));
+            }
+            // a Story being delivered as a whole carries its Tasks
+            let story = item.parent.and_then(|p| snap.item(p));
+            if let Some(st) = story.filter(|st| {
+                st.pulls.iter().any(|p| p.open())
+                    || stage::at_or_past(st.stage.as_deref(), STAGE_CODE_REVIEW)
+            }) {
+                return Some(decided(
+                    Action::Implement,
+                    format!(
+                        "Its Story #{} is in code review: the Story's pull request carries its Tasks.",
+                        st.number
+                    ),
+                    block(
+                        "with-story",
+                        "A Task of a delivered Story is not built again on its own.",
+                        format!(
+                            "Change the Story's pull request (`project run {} --step fix-pr` after a review).",
+                            st.number
+                        ),
+                    ),
+                ));
+            }
+            Some(gates(
+                "Task",
                 match item.parent {
-                    Some(p) => format!("Run #{p}."),
-                    None => "Put the Task under a Story.".to_string(),
+                    Some(p) => format!(
+                        "Built on its own: one pull request for this Task alone. Running #{p} builds the Story with all its Tasks instead."
+                    ),
+                    None => "Built on its own: one pull request for this Task.".to_string(),
                 },
-            ),
-        )),
+            ))
+        }
         ItemType::Bug => {
             if super::next::next_step(item).action != Action::Implement {
                 return None;
@@ -800,28 +986,44 @@ pub fn decision(item: &Item, snap: &Snapshot, ignore_dependencies: bool) -> Opti
             if t == ItemType::Rfc {
                 return None;
             }
-            let next = order
+            let pending = order
                 .rows
                 .iter()
-                .find(|r| r.open && !stage::at_or_past(Some(&r.stage), STAGE_CODE_REVIEW));
-            Some(match next {
-                Some(r) => decided(
-                    Action::Implement,
-                    format!(
-                        "Its Stories are built one at a time; the next in order is #{} «{}».",
-                        r.number,
-                        strip_tag(&r.title)
-                    ),
-                    block(
-                        "by-story",
-                        "agent-mux does not build a Feature's Stories as one stack yet.",
-                        format!("Run #{}.", r.number),
-                    ),
-                ),
-                None => decided(
+                .any(|r| r.open && !stage::at_or_past(Some(&r.stage), STAGE_CODE_REVIEW));
+            if !pending {
+                return Some(decided(
                     Action::None,
                     "Every Story is in code review or further on.",
                     None,
+                ));
+            }
+            Some(match super::stack::plan(snap, n) {
+                Ok(p) => decided(
+                    Action::Implement,
+                    format!(
+                        "Its {} pending Stor{} built as a stack, one at a time, in order: {}.",
+                        p.pending.len(),
+                        if p.pending.len() == 1 {
+                            "y is"
+                        } else {
+                            "ies are"
+                        },
+                        p.pending
+                            .iter()
+                            .map(|s| format!("#{}", s.number))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    None,
+                ),
+                Err(e) => decided(
+                    Action::Implement,
+                    "Its Stories cannot be built as a stack yet.",
+                    block(
+                        "stack-blocked",
+                        e,
+                        "Fix what is named, or build one Story on its own by running it.",
+                    ),
                 ),
             })
         }
@@ -835,6 +1037,8 @@ pub fn decision(item: &Item, snap: &Snapshot, ignore_dependencies: bool) -> Opti
 pub enum BuildKind {
     Story,
     Bug,
+    /// One Task on its own, with a pull request of its own.
+    Task,
 }
 
 impl BuildKind {
@@ -842,6 +1046,25 @@ impl BuildKind {
         match self {
             BuildKind::Story => "story",
             BuildKind::Bug => "bug",
+            BuildKind::Task => "task",
+        }
+    }
+
+    /// The `kind` the step skills switch on: a Task alone is worked and
+    /// reviewed as a Story with one Task.
+    pub fn skill_kind(self) -> &'static str {
+        match self {
+            BuildKind::Bug => "bug",
+            BuildKind::Story | BuildKind::Task => "story",
+        }
+    }
+
+    /// The item's type, as a person reads it.
+    pub fn label(self) -> &'static str {
+        match self {
+            BuildKind::Story => "Story",
+            BuildKind::Bug => "Bug",
+            BuildKind::Task => "Task",
         }
     }
 }
@@ -855,9 +1078,23 @@ pub struct Build {
     pub url: String,
     pub flow: &'static str,
     pub target: RepoDir,
-    /// The remote's default branch: what the work forks from and the pull
-    /// request's base.
+    /// What the work forks from and the pull request's base: the remote's
+    /// default branch, or the branch of the Story this one is stacked on.
     pub base: String,
+    /// The Story whose open pull request this build is stacked on.
+    pub stacked_on: Option<u64>,
+    /// Dependencies whose code is on an open pull request in this
+    /// repository, with their branches: each must be under `base`.
+    pub under: Vec<(u64, String)>,
+    /// The Feature above a Story: its drafts are marked ready when its
+    /// last Story is delivered.
+    pub feature: Option<u64>,
+    /// Leave the Feature's pull requests as drafts (`--keep-drafts`).
+    pub keep_drafts: bool,
+    /// The Story above a Task built on its own, for the commits' trail.
+    pub story: Option<u64>,
+    /// Set when the Story changes several repositories: which one this is.
+    pub part: Option<Part>,
     pub branch: String,
     pub prefix: &'static str,
     pub tasks: Vec<IssueText>,
@@ -872,6 +1109,7 @@ pub fn branch_for(kind: BuildKind, number: u64, title: &str) -> (&'static str, S
     let prefix = match kind {
         BuildKind::Story => "story/",
         BuildKind::Bug => "fix/",
+        BuildKind::Task => "task/",
     };
     let slug = slugify(strip_tag(title));
     let slug: String = slug.chars().take(40).collect();
@@ -913,17 +1151,83 @@ impl<'a> Ctx<'a> {
         if !d.runnable() {
             return Ok(Planned::Stopped(d));
         }
-        let kind = if item.item_type == Some(ItemType::Bug) {
-            BuildKind::Bug
-        } else {
-            BuildKind::Story
+        if item.item_type == Some(ItemType::Feature) {
+            return Ok(Planned::Stack(Box::new(super::stack::plan(
+                snap,
+                item.number,
+            )?)));
+        }
+        let kind = match item.item_type {
+            Some(ItemType::Bug) => BuildKind::Bug,
+            Some(ItemType::Task) => BuildKind::Task,
+            _ => BuildKind::Story,
         };
         let n = item.number;
         // a Story with no label of its own takes its repository from where
         // the label is: nowhere else, so a missing label is said, not guessed
-        let target = target_repo(&self.hub_root, self.cfg, item)?;
+        let (target, part) = match kind {
+            BuildKind::Story if item.repos.len() > 1 => {
+                // one repository at a time, in the order of the labels: the
+                // next is the first with no pull request of this Story
+                let all = targets(&self.hub_root, self.cfg, item)?;
+                let has = |t: &RepoDir| {
+                    item.pulls
+                        .iter()
+                        .find(|p| {
+                            (p.open() || p.merged()) && p.repo.eq_ignore_ascii_case(&t.repo.slug())
+                        })
+                        .map(|p| p.head.clone())
+                };
+                let delivered: Vec<(String, String)> = all
+                    .iter()
+                    .filter_map(|t| has(t).map(|b| (t.repo.slug(), b)))
+                    .collect();
+                let Some(at) = all.iter().position(|t| has(t).is_none()) else {
+                    return Err(format!(
+                        "#{n} has a pull request in each of its repositories already"
+                    ));
+                };
+                let part = Part {
+                    index: at + 1,
+                    total: all.len(),
+                    others: all
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i != at)
+                        .map(|(_, t)| t.repo.slug())
+                        .collect(),
+                    delivered,
+                };
+                (all[at].clone(), Some(part))
+            }
+            _ => (target_repo(&self.hub_root, self.cfg, item)?, None),
+        };
         check_checkout(&target)?;
-        let base = factory::default_branch(&target.dir)?;
+        let default = factory::default_branch(&target.dir)?;
+        // a Story is stacked on the Story before it, in its Feature's
+        // order, that has an open pull request in the same repository
+        let above = match kind {
+            BuildKind::Story => snap
+                .ancestor(n, ItemType::Feature)
+                .map(|f| f.number)
+                .filter(|f| *f != n),
+            BuildKind::Bug | BuildKind::Task => None,
+        };
+        let repo = target.repo.slug();
+        let stacked = above
+            .and_then(|f| super::order::feature_order(snap, f).ok())
+            .and_then(|o| {
+                let order: Vec<u64> = o.rows.iter().map(|r| r.number).collect();
+                super::stack::base_for(snap, &order, n, &repo)
+            });
+        let under = match kind {
+            BuildKind::Story => super::stack::under(snap, item, &repo),
+            BuildKind::Bug | BuildKind::Task => Vec::new(),
+        };
+        let base = match &stacked {
+            Some((_, branch)) => branch.clone(),
+            None => default,
+        };
         let (prefix, branch) = branch_for(kind, n, &item.title);
         if factory::free_branch(&target.dir, &branch)? != branch {
             return Err(format!(
@@ -932,6 +1236,24 @@ impl<'a> Ctx<'a> {
             ));
         }
         let mut notes = Vec::new();
+        if let Some(p) = &part {
+            notes.push(format!(
+                "repository {} of {} of this Story: {}{}",
+                p.index,
+                p.total,
+                repo,
+                if p.last() {
+                    "; the board moves when this one is delivered".to_string()
+                } else {
+                    format!("; then {}", p.others[p.delivered.len()..].join(", "))
+                }
+            ));
+        }
+        if let Some((on, b)) = &stacked {
+            notes.push(format!(
+                "stacked on Story #{on}: forks from its branch `{b}`, and its pull request is this one's base"
+            ));
+        }
         let warnings = pending_dependencies(item, snap);
         if !warnings.is_empty() {
             notes.push(format!("! building out of order: {}", warnings.join("; ")));
@@ -976,8 +1298,44 @@ impl<'a> Ctx<'a> {
                     comments: &comments,
                     spec,
                     plan,
+                    part: part.as_ref().map(|p| part_note(&repo, p)),
                 });
                 (context, tasks, criteria)
+            }
+            BuildKind::Task => {
+                comments.extend(comment_group("Task", n, detail));
+                let story = match item.parent {
+                    Some(p) => {
+                        let sd = github::issue_detail(self.tools, self.cfg, p)?;
+                        comments.extend(comment_group("Story", p, &sd));
+                        Some(text_of(p, &sd))
+                    }
+                    None => None,
+                };
+                let feature = snap.ancestor(n, ItemType::Feature);
+                let doc = |name: &str| -> Option<(String, String)> {
+                    let f = feature?;
+                    let path = doc_path(ItemType::Feature, &f.title, name);
+                    let text = self.base_file(&path).ok().flatten()?;
+                    Some((path, text))
+                };
+                let task = text_of(n, detail);
+                let mut criteria = acceptance_criteria(&task.body);
+                if criteria.is_empty() {
+                    criteria.push(format!(
+                        "Task #{n} «{}» implementada por completo, com testes",
+                        strip_tag(&task.title)
+                    ));
+                }
+                let context = task_context(&TaskInput {
+                    task: task.clone(),
+                    story,
+                    feature: feature.map(|f| (f.number, f.name().to_string())),
+                    comments: &comments,
+                    spec: doc("spec"),
+                    plan: doc("plan"),
+                });
+                (context, vec![task], criteria)
             }
             BuildKind::Bug => {
                 comments.extend(comment_group("Bug", n, detail));
@@ -1009,7 +1367,7 @@ impl<'a> Ctx<'a> {
             }
         };
         let args = json!({
-            "kind": kind.as_str(),
+            "kind": kind.skill_kind(),
             "context": context,
             "criteria": criteria.iter().map(|c| format!("- {c}")).collect::<Vec<_>>().join("\n"),
         });
@@ -1019,11 +1377,20 @@ impl<'a> Ctx<'a> {
             title: item.title.clone(),
             url: detail.url.clone(),
             flow: match kind {
-                BuildKind::Story => FLOW_STORY,
+                BuildKind::Story | BuildKind::Task => FLOW_STORY,
                 BuildKind::Bug => FLOW_BUG_FIX,
             },
             target,
             base,
+            stacked_on: stacked.map(|(on, _)| on),
+            under,
+            feature: above,
+            keep_drafts: false,
+            story: match kind {
+                BuildKind::Task => item.parent,
+                _ => None,
+            },
+            part,
             branch,
             prefix,
             tasks,
@@ -1093,8 +1460,14 @@ impl<'a> Ctx<'a> {
         };
         let mut r = Report::default();
         // the trail spec-wave's merge reads; one commit that carries it is enough
-        if b.kind == BuildKind::Story {
+        if b.kind != BuildKind::Bug {
             let tasks: Vec<u64> = b.tasks.iter().map(|t| t.number).collect();
+            // a Story's trail names itself; a Task's names the Story above it
+            let story = match b.kind {
+                BuildKind::Task => b.story,
+                _ => Some(b.number),
+            };
+            let stories: Vec<u64> = story.into_iter().collect();
             let log = git(
                 &wt.path,
                 &[
@@ -1108,12 +1481,13 @@ impl<'a> Ctx<'a> {
                 .map(|m| m.trim().to_string())
                 .filter(|m| !m.is_empty())
                 .collect();
-            let (stories, missing) = missing_trailers(&messages, &[b.number], &tasks);
-            if !stories.is_empty() || !missing.is_empty() {
+            let (lacking, missing) = missing_trailers(&messages, &stories, &tasks);
+            if !lacking.is_empty() || !missing.is_empty() {
                 let message = format!(
-                    "chore: rastro da Story #{}\n\n{}",
+                    "chore: rastro da {} #{}\n\n{}",
+                    b.kind.label(),
                     b.number,
-                    trailers(Some(b.number), &tasks, None)
+                    trailers(story, &tasks, None)
                 );
                 git(
                     &wt.path,
@@ -1126,7 +1500,10 @@ impl<'a> Ctx<'a> {
                         &message,
                     ],
                 )?;
-                r.say("the commits did not carry the Story's trailers: an empty commit with them was added");
+                r.say(format!(
+                    "the commits did not carry the {}'s trailers: an empty commit with them was added",
+                    b.kind.label()
+                ));
             }
         }
         factory::push(wt, b.prefix, &b.branch, &b.base).map_err(|e| format!("{e}.{at}"))?;
@@ -1150,13 +1527,43 @@ impl<'a> Ctx<'a> {
                 closing_line(b, &hub)
             )
         })?;
-        r.say(format!("opened the draft pull request {url}"));
-        let moved = self.ops(snap).build_board(true, b.number);
-        r.lines.extend(moved.lines);
-        for n in moved.touched {
-            r.touch(n);
+        r.say(format!("{OPENED_PR}{url}"));
+        // a Story across repositories is in review when its last one is
+        let more = b.part.as_ref().filter(|p| !p.last());
+        if let Some(p) = more {
+            r.say(format!(
+                "{} of {} repositories of #{} delivered: the board moves after the last",
+                p.delivered.len() + 1,
+                p.total,
+                b.number
+            ));
+        } else {
+            let moved = self.ops(snap).build_board(true, b.number);
+            r.lines.extend(moved.lines);
+            for n in moved.touched {
+                r.touch(n);
+            }
         }
         r.touch(b.number);
+        // the Feature's last Story: its pull requests leave draft together
+        if let Some(f) = b.feature.filter(|_| !b.keep_drafts && more.is_none()) {
+            let stories = super::ops::read_items(self.tools, self.cfg, &[f])
+                .ok()
+                .and_then(|v| v.into_iter().find(|i| i.number == f))
+                .map(|feature| {
+                    super::ops::read_items(self.tools, self.cfg, &feature.children)
+                        .unwrap_or_default()
+                });
+            match stories {
+                Some(stories) => {
+                    let ready = super::stack::mark_ready(self.tools, self.cfg, f, &stories);
+                    r.lines.extend(ready.lines);
+                }
+                None => r.say(format!(
+                    "! Feature #{f} was not read: its pull requests stay drafts"
+                )),
+            }
+        }
         let note = delivered_comment(b, &url, s.cycles);
         match write::comment(self.tools, self.cfg, b.number, &note) {
             Ok(()) => r.say("commented on the issue"),
@@ -1164,6 +1571,34 @@ impl<'a> Ctx<'a> {
         }
         Ok(r)
     }
+}
+
+/// After the base was fetched: every dependency this build stacks over
+/// must be under what it forks from, or the session would not have its
+/// code. `Err` names the one that is not.
+pub fn check_stack(b: &Build) -> Result<(), String> {
+    for (n, branch) in &b.under {
+        if *branch == b.base {
+            continue;
+        }
+        factory::fetch(&b.target.dir, branch)?;
+        let under = git(
+            &b.target.dir,
+            &[
+                "merge-base",
+                "--is-ancestor",
+                &format!("origin/{branch}"),
+                &format!("origin/{}", b.base),
+            ],
+        );
+        if under.is_err() {
+            return Err(format!(
+                "Story #{n}, which #{} depends on, has its code on `{branch}`, and that branch is not under `{}`, which this build forks from: merge #{n} first, or rebase the stack so `{}` contains it",
+                b.number, b.base, b.base
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn strings(v: &Value, key: &str) -> Vec<String> {
@@ -1182,7 +1617,7 @@ pub(crate) fn strings(v: &Value, key: &str) -> Vec<String> {
 /// The line that links the pull request to its hub issue.
 pub fn closing_line(b: &Build, hub: &str) -> String {
     let word = match b.kind {
-        BuildKind::Story => "Closes",
+        BuildKind::Story | BuildKind::Task => "Closes",
         BuildKind::Bug => "Fixes",
     };
     format!("{word} {}", closes_ref(hub, b.number))
@@ -1198,10 +1633,7 @@ pub fn pr_body(b: &Build, hub: &str, work: &Value, review: &Value, cycles: i64) 
     let mut l: Vec<String> = vec![closing_line(b, hub), String::new()];
     l.push(format!(
         "{} do spec-wave: [{}]({})",
-        match b.kind {
-            BuildKind::Story => "Story",
-            BuildKind::Bug => "Bug",
-        },
+        b.kind.label(),
         b.title,
         b.url
     ));
@@ -1431,6 +1863,7 @@ mod tests {
             comments: &[],
             spec: None,
             plan: Some(("docs/features/pedidos/plan.md".into(), "# Plano".into())),
+            part: None,
         });
         assert!(text.starts_with("# Contexto de implementação — Story #12\n\n**Story:** [STORY] ver pedidos\n**Feature:** #3 — Pedidos\n\nComo cliente…"));
         assert!(text.contains("## ⚠️ Dependências pendentes\n\n- #9 «login» está em Code Review"));
@@ -1553,11 +1986,25 @@ mod tests {
         assert!(d.runnable(), "{d:?}");
         assert!(d.reason.contains("1 Task"));
 
-        // in review is not merged: the default branch lacks its code
+        // in review with no open pull request: its code is nowhere to build on
         let s = snap(vec![story.clone(), task.clone(), dep(STAGE_CODE_REVIEW)]);
         let d = decision(&story, &s, false).unwrap();
         assert_eq!(d.blocked.as_ref().unwrap().code, "dependency-pending");
         assert!(decision(&story, &s, true).unwrap().runnable());
+        // with one, the build stacks on it
+        let mut open_dep = dep(STAGE_CODE_REVIEW);
+        open_dep.pulls.push(crate::project::Pull {
+            repo: "acme/api".into(),
+            number: 39,
+            url: String::new(),
+            state: "OPEN".into(),
+            draft: true,
+            head: "story/9-login".into(),
+            base: "main".into(),
+            review: String::new(),
+        });
+        let s = snap(vec![story.clone(), task.clone(), open_dep]);
+        assert!(decision(&story, &s, false).unwrap().runnable());
 
         // an open pull request stops a second build, whatever the flags
         let mut with_pr = story.clone();
@@ -1590,10 +2037,144 @@ mod tests {
         let d = decision(&late, &snap(vec![late.clone()]), false).unwrap();
         assert!(!d.runnable() && d.blocked.is_none());
 
+        // a Task of a Story whose code is in review is not built again
         assert_eq!(
             decision(&task, &s, false).unwrap().blocked.unwrap().code,
             "with-story"
         );
+    }
+
+    #[test]
+    fn a_story_across_repositories_is_in_review_when_each_has_its_pull_request() {
+        let pull = |repo: &str, n: u64| crate::project::Pull {
+            repo: repo.into(),
+            number: n,
+            url: String::new(),
+            state: "OPEN".into(),
+            draft: true,
+            head: "story/12-ver-pedidos".into(),
+            base: "main".into(),
+            review: String::new(),
+        };
+        let mut story = staged(item(12, "[STORY] ver pedidos", &[]), STAGE_DEVELOPMENT);
+        story.repos = vec!["api".into(), "web".into()];
+        story.pulls = vec![pull("acme/api", 40)];
+        // one of two delivered: the build goes on with the other
+        let d = decision(&story, &snap(vec![story.clone()]), false).unwrap();
+        assert!(d.runnable(), "{d:?}");
+        story.pulls.push(pull("acme/web", 9));
+        let d = decision(&story, &snap(vec![story.clone()]), false).unwrap();
+        assert_eq!(d.blocked.unwrap().code, "pr-pending");
+
+        let part = Part {
+            index: 2,
+            total: 3,
+            others: vec!["acme/api".into(), "acme/mobile".into()],
+            delivered: vec![("acme/api".into(), "story/12-ver-pedidos".into())],
+        };
+        assert!(!part.last());
+        assert!(
+            Part {
+                delivered: vec![
+                    ("acme/api".into(), "b".into()),
+                    ("acme/mobile".into(), "b".into())
+                ],
+                ..part.clone()
+            }
+            .last()
+        );
+        let note = part_note("acme/web", &part);
+        assert!(
+            note.starts_with("## Repositório desta sessão: `acme/web` (2 de 3)"),
+            "{note}"
+        );
+        assert!(note.contains("`acme/api`, `acme/mobile`"), "{note}");
+        assert!(note.contains("Implemente **somente** o que pertence a `acme/web`"));
+        assert!(note.contains("fora deste repositório"));
+        assert!(note.contains("Já entregue: `acme/api`, no branch `story/12-ver-pedidos`"));
+        let text = story_context(&StoryInput {
+            story: IssueText {
+                number: 12,
+                title: "[STORY] ver pedidos".into(),
+                body: String::new(),
+            },
+            part: Some(note),
+            ..Default::default()
+        });
+        let (rule, part_at, tasks) = (
+            text.find("NÃO abra Pull Request").unwrap(),
+            text.find("## Repositório desta sessão").unwrap(),
+            text.find("## Tasks a implementar").unwrap(),
+        );
+        assert!(rule < part_at && part_at < tasks, "{text}");
+    }
+
+    #[test]
+    fn a_task_is_built_on_its_own_while_its_story_is_not_delivered() {
+        let story = staged(item(12, "[STORY] ver pedidos", &[]), STAGE_READY);
+        let mut task = staged(item(13, "[TASK] endpoint", &[]), STAGE_READY);
+        task.parent = Some(12);
+        let s = snap(vec![story.clone(), task.clone()]);
+        let d = decision(&task, &s, false).unwrap();
+        assert!(d.runnable(), "{d:?}");
+        assert!(
+            d.reason.contains("one pull request for this Task alone"),
+            "{}",
+            d.reason
+        );
+        assert!(d.reason.contains("Running #12"), "{}", d.reason);
+
+        // in development is still buildable; done is not, and neither is backlog
+        let dev = staged(task.clone(), STAGE_DEVELOPMENT);
+        assert!(decision(&dev, &s, false).unwrap().runnable());
+        let done = staged(task.clone(), STAGE_DONE);
+        let d = decision(&done, &s, false).unwrap();
+        assert!(!d.runnable() && d.blocked.is_none());
+        let early = staged(task.clone(), STAGE_BACKLOG);
+        assert_eq!(
+            decision(&early, &s, false).unwrap().blocked.unwrap().code,
+            "not-ready"
+        );
+        // the Story went to review: its pull request carries the Task
+        let s = snap(vec![staged(story, STAGE_CODE_REVIEW), task.clone()]);
+        assert_eq!(
+            decision(&task, &s, false).unwrap().blocked.unwrap().code,
+            "with-story"
+        );
+
+        assert_eq!(
+            branch_for(BuildKind::Task, 13, "[TASK] Endpoint de pedidos"),
+            ("task/", "task/13-endpoint-de-pedidos".to_string())
+        );
+        let text = task_context(&TaskInput {
+            task: IssueText {
+                number: 13,
+                title: "[TASK] endpoint".into(),
+                body: "GET /pedidos".into(),
+            },
+            story: Some(IssueText {
+                number: 12,
+                title: "[STORY] ver pedidos".into(),
+                body: "Como cliente quero ver meus pedidos".into(),
+            }),
+            feature: Some((3, "Pedidos".into())),
+            comments: &[],
+            spec: None,
+            plan: Some(("docs/features/pedidos/plan.md".into(), "# Plano".into())),
+        });
+        assert!(
+            text.starts_with("# Contexto de implementação — Task #13\n"),
+            "{text}"
+        );
+        assert!(text.contains("**Story:** #12 — [STORY] ver pedidos"));
+        assert!(text.contains("Implemente **somente** a Task #13"));
+        assert!(
+            text.contains("   Spec-Wave-Story: #12\n   Spec-Wave-Tasks: #13"),
+            "{text}"
+        );
+        assert!(text.contains("NÃO abra Pull Request"));
+        assert!(text.contains("## A Story #12 (contexto — NÃO a implemente inteira)"));
+        assert!(text.contains("## plan.md (docs/features/pedidos/plan.md)"));
     }
 
     #[test]
@@ -1633,6 +2214,85 @@ mod tests {
 
         let spec = item(3, "[FEATURE] Pedidos", &[]);
         assert!(decision(&spec, &snap(vec![spec.clone()]), false).is_none());
+    }
+
+    #[test]
+    fn a_feature_whose_stories_are_ready_is_a_stack() {
+        let feature = {
+            let mut f = staged(
+                item(
+                    3,
+                    "[FEATURE] Pedidos",
+                    &[LABEL_PLAN_APPROVED, LABEL_DECOMPOSED],
+                ),
+                STAGE_READY,
+            );
+            f.children = vec![11, 12];
+            for name in ["spec", "plan", "decomposition"] {
+                f.docs.insert(
+                    name.into(),
+                    crate::project::Doc {
+                        state: crate::project::DocState::Base,
+                        path: format!("docs/features/pedidos/{name}.md"),
+                        pr: None,
+                        branch: None,
+                    },
+                );
+            }
+            f
+        };
+        let story = |n: u64, stage: &str, deps: &[u64]| {
+            let mut s = staged(item(n, "[STORY] s", &[]), stage);
+            s.parent = Some(3);
+            s.depends_on = deps.to_vec();
+            s
+        };
+        let task = |n: u64, parent: u64| {
+            let mut t = staged(item(n, "[TASK] t", &[]), STAGE_READY);
+            t.parent = Some(parent);
+            t
+        };
+        let s = snap(vec![
+            feature.clone(),
+            story(11, STAGE_READY, &[]),
+            story(12, STAGE_READY, &[11]),
+            task(111, 11),
+            task(121, 12),
+        ]);
+        let d = decision(&feature, &s, false).unwrap_or_else(|| {
+            panic!(
+                "a Feature in Ready has a build step: {:?}",
+                super::super::next::next_step(&feature)
+            )
+        });
+        assert!(d.runnable(), "{d:?}");
+        assert!(
+            d.reason.contains("2 pending Stories are built as a stack"),
+            "{}",
+            d.reason
+        );
+        assert!(d.reason.contains("#11, #12"), "{}", d.reason);
+
+        // a pending Story with no Task stops the stack and says which
+        let s = snap(vec![
+            feature.clone(),
+            story(11, STAGE_READY, &[]),
+            story(12, STAGE_READY, &[11]),
+            task(111, 11),
+        ]);
+        let d = decision(&feature, &s, false).unwrap();
+        let b = d.blocked.expect("blocked");
+        assert_eq!(b.code, "stack-blocked");
+        assert!(b.message.contains("Story #12 has no Task"), "{}", b.message);
+
+        // every Story in review: nothing to build
+        let s = snap(vec![
+            feature.clone(),
+            story(11, STAGE_CODE_REVIEW, &[]),
+            story(12, STAGE_QA, &[11]),
+        ]);
+        let d = decision(&feature, &s, false).unwrap();
+        assert!(!d.runnable() && d.blocked.is_none(), "{d:?}");
     }
 
     #[cfg(unix)]
@@ -1745,6 +2405,12 @@ mod tests {
                         source: "hub",
                     },
                     base: "main".into(),
+                    stacked_on: None,
+                    under: Vec::new(),
+                    feature: None,
+                    keep_drafts: false,
+                    story: None,
+                    part: None,
                     branch: "story/12-ver-pedidos".into(),
                     prefix: "story/",
                     tasks: vec![IssueText {
@@ -1849,6 +2515,334 @@ mod tests {
             );
             assert_eq!(r.touched, vec![13, 12]);
             assert!(r.lines.iter().any(|l| l.contains("an empty commit")));
+        }
+
+        /// A Story stacked on Story #9: `story/9-login` is on the remote
+        /// with the fixture's commit, and the work forks from it.
+        fn stacked(f: &Fx) -> (Build, Worktree) {
+            sh(
+                &f.wt.path,
+                &["push", "-q", "origin", "HEAD:refs/heads/story/9-login"],
+            );
+            sh(&f.clone, &["fetch", "-q", "origin", "story/9-login"]);
+            let path = f.root.join("wt2");
+            sh(
+                &f.clone,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "loop/run2",
+                    path.to_str().unwrap(),
+                    "origin/story/9-login",
+                ],
+            );
+            std::fs::write(path.join("filtro.rs"), "fn filtro() {}\n").unwrap();
+            sh(&path, &["add", "."]);
+            sh(
+                &path,
+                &[
+                    "commit",
+                    "-q",
+                    "-m",
+                    "feat: filtro\n\nSpec-Wave-Story: #12\nSpec-Wave-Tasks: #13",
+                ],
+            );
+            let b = Build {
+                base: "story/9-login".into(),
+                stacked_on: Some(9),
+                under: vec![(9, "story/9-login".into())],
+                ..f.build()
+            };
+            (
+                b,
+                Worktree {
+                    path,
+                    branch: "loop/run2".into(),
+                    base: "origin/story/9-login".into(),
+                },
+            )
+        }
+
+        #[test]
+        fn a_stacked_build_opens_its_pull_request_on_the_story_below() {
+            let f = fx("feat: login");
+            let (b, wt) = stacked(&f);
+            check_stack(&b).unwrap();
+            f.ctx()
+                .build_finish(&b, &approved(true), Some(&wt), &Snapshot::default())
+                .unwrap();
+            let calls = f.calls();
+            let pr = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
+            assert!(
+                pr.contains("--draft --base story/9-login --head story/12-ver-pedidos"),
+                "{pr}"
+            );
+            // only the Story's own commit is above its base
+            let above = sh(
+                &f.clone,
+                &["ls-remote", "--heads", "origin", "story/12-ver-pedidos"],
+            );
+            assert!(!above.is_empty());
+            // no Feature above it: nothing is marked ready
+            assert!(
+                !calls.iter().any(|c| c.starts_with("pr ready")),
+                "{calls:?}"
+            );
+
+            // a dependency whose branch is not under the base stops the build
+            let off = Build {
+                base: "main".into(),
+                ..b.clone()
+            };
+            let e = check_stack(&off).unwrap_err();
+            assert!(
+                e.contains("Story #9") && e.contains("not under `main`"),
+                "{e}"
+            );
+            // one that is under it does not
+            let on = Build {
+                under: vec![(1, "main".into())],
+                ..b
+            };
+            check_stack(&on).unwrap();
+        }
+
+        /// The fixture's `gh`, with Feature #30 above Story #12, the Story
+        /// read as in code review, and one draft pull request that closes it.
+        fn with_feature(f: &Fx) {
+            let feature = format!(
+                r#"{},"subIssues":{{"nodes":[{{"number":12}}]}}"#,
+                node(
+                    30,
+                    "[FEATURE] Pedidos",
+                    &["[FEATURE]"],
+                    Some("🚧 Desenvolvimento"),
+                    ""
+                )
+            );
+            let story = format!(
+                r#"{},"subIssues":{{"nodes":[{{"number":13}}]}},"parent":{{"number":30}}"#,
+                node(
+                    12,
+                    "[STORY] ver pedidos",
+                    &["[STORY]"],
+                    Some("👀 Code Review"),
+                    ""
+                )
+            );
+            let task = format!(
+                r#"{},"parent":{{"number":12}}"#,
+                node(13, "[TASK] endpoint", &["[TASK]"], Some("🎉 Done"), "")
+            );
+            std::fs::write(
+                f.root.join("pulls.json"),
+                r#"[{"number":40,"title":"ver pedidos","body":"Closes acme/hub#12","headRefName":"story/12-ver-pedidos","baseRefName":"main","isDraft":true,"state":"OPEN","url":"https://github.com/acme/hub/pull/40"},
+                    {"number":41,"title":"outra","body":"Closes #77","headRefName":"x","baseRefName":"main","isDraft":true,"state":"OPEN","url":"u"}]"#,
+            )
+            .unwrap();
+            fake_gh(
+                &f.root,
+                &nodes(&[story, task, feature]),
+                r#"  "pr create"*) echo 'https://github.com/acme/hub/pull/40' ;;
+  "pr list"*) cat "$d/pulls.json" ;;
+  "pr ready"*) echo ok ;;"#,
+            );
+        }
+
+        #[test]
+        fn the_last_story_of_a_feature_marks_its_drafts_ready() {
+            let f = fx("feat: pedidos");
+            with_feature(&f);
+            let b = Build {
+                feature: Some(30),
+                ..f.build()
+            };
+            let r = f
+                .ctx()
+                .build_finish(&b, &approved(true), Some(&f.wt), &Snapshot::default())
+                .unwrap();
+            let calls = f.calls();
+            let ready: Vec<&String> = calls.iter().filter(|c| c.starts_with("pr ready")).collect();
+            assert_eq!(ready.len(), 1, "{calls:?}");
+            assert!(
+                ready[0].starts_with("pr ready 40 --repo acme/hub"),
+                "{}",
+                ready[0]
+            );
+            // it is marked after the pull request exists and before the note
+            let at = |what: &str| calls.iter().position(|c| c.starts_with(what)).unwrap();
+            assert!(at("pr create") < at("pr ready") && at("pr ready") < at("issue comment"));
+            assert!(
+                r.lines
+                    .iter()
+                    .any(|l| l.contains("Feature #30") && l.contains("marked ready for review #40")),
+                "{:?}",
+                r.lines
+            );
+
+            // --keep-drafts: delivered the same, and nothing is marked
+            let f = fx("feat: pedidos");
+            with_feature(&f);
+            let b = Build {
+                feature: Some(30),
+                keep_drafts: true,
+                ..f.build()
+            };
+            f.ctx()
+                .build_finish(&b, &approved(true), Some(&f.wt), &Snapshot::default())
+                .unwrap();
+            let calls = f.calls();
+            assert!(calls.iter().any(|c| c.starts_with("pr create")));
+            assert!(
+                !calls.iter().any(|c| c.starts_with("pr ready")),
+                "{calls:?}"
+            );
+            assert!(!calls.iter().any(|c| c.starts_with("pr list")), "{calls:?}");
+        }
+
+        #[test]
+        fn a_repository_that_is_not_the_storys_last_moves_no_board() {
+            let f = fx("feat: pedidos");
+            with_feature(&f);
+            let part = |delivered: Vec<(String, String)>| Part {
+                index: delivered.len() + 1,
+                total: 2,
+                others: vec!["acme/web".into()],
+                delivered,
+            };
+            let b = Build {
+                feature: Some(30),
+                part: Some(part(Vec::new())),
+                ..f.build()
+            };
+            let r = f
+                .ctx()
+                .build_finish(&b, &approved(true), Some(&f.wt), &Snapshot::default())
+                .unwrap();
+            let calls = f.calls();
+            // the branch and the pull request are there, and the note on the issue
+            assert!(
+                f.remote_branches()
+                    .contains("refs/heads/story/12-ver-pedidos")
+            );
+            assert!(calls.iter().any(|c| c.starts_with("pr create")));
+            assert!(calls.iter().any(|c| c.starts_with("issue comment 12")));
+            // nothing moved and nothing was marked ready: one repository is left
+            assert!(
+                !calls
+                    .iter()
+                    .any(|c| c.contains("updateProjectV2ItemFieldValue")),
+                "{calls:?}"
+            );
+            assert!(
+                !calls.iter().any(|c| c.starts_with("pr ready")),
+                "{calls:?}"
+            );
+            assert!(
+                r.lines
+                    .iter()
+                    .any(|l| l.contains("1 of 2 repositories of #12 delivered")),
+                "{:?}",
+                r.lines
+            );
+
+            // the last one moves the board and marks the drafts ready
+            let f = fx("feat: pedidos");
+            with_feature(&f);
+            let b = Build {
+                feature: Some(30),
+                part: Some(part(vec![(
+                    "acme/api".into(),
+                    "story/12-ver-pedidos".into(),
+                )])),
+                ..f.build()
+            };
+            f.ctx()
+                .build_finish(&b, &approved(true), Some(&f.wt), &Snapshot::default())
+                .unwrap();
+            let calls = f.calls();
+            assert!(
+                calls
+                    .iter()
+                    .any(|c| c.contains("updateProjectV2ItemFieldValue")),
+                "{calls:?}"
+            );
+            assert!(
+                calls.iter().any(|c| c.starts_with("pr ready 40")),
+                "{calls:?}"
+            );
+        }
+
+        #[test]
+        fn a_task_alone_is_delivered_on_its_own_branch_and_ends_done() {
+            let f = fx("feat: endpoint");
+            let task = format!(
+                r#"{},"parent":{{"number":12}}"#,
+                node(
+                    13,
+                    "[TASK] endpoint",
+                    &["[TASK]"],
+                    Some("🚧 Desenvolvimento"),
+                    ""
+                )
+            );
+            fake_gh(
+                &f.root,
+                &nodes(&[task]),
+                r#"  "pr create"*) echo 'https://github.com/acme/hub/pull/41' ;;"#,
+            );
+            let b = Build {
+                kind: BuildKind::Task,
+                number: 13,
+                title: "[TASK] endpoint".into(),
+                url: "https://github.com/acme/hub/issues/13".into(),
+                branch: "task/13-endpoint".into(),
+                prefix: "task/",
+                story: Some(12),
+                ..f.build()
+            };
+            let r = f
+                .ctx()
+                .build_finish(&b, &approved(true), Some(&f.wt), &Snapshot::default())
+                .unwrap();
+            assert!(f.remote_branches().contains("refs/heads/task/13-endpoint"));
+            // the trail names the Story above the Task
+            let last = sh(&f.wt.path, &["log", "-1", "--format=%B"]);
+            assert_eq!(
+                parse_trailers(&last),
+                Trailers {
+                    story: Some(12),
+                    tasks: vec![13],
+                    agent: None
+                }
+            );
+            let calls = f.calls();
+            let pr = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
+            assert!(
+                pr.contains("--draft --base main --head task/13-endpoint --title endpoint"),
+                "{pr}"
+            );
+            assert!(pr.contains("Closes acme/hub#13"), "{pr}");
+            assert!(pr.contains("Task do spec-wave"), "{pr}");
+            // the Task ends Done, as a Story's Tasks do; nothing goes to review
+            assert!(
+                calls
+                    .iter()
+                    .any(|c| c.contains("itemId=PVTI_13") && c.contains("optionId=o_done")),
+                "{calls:?}"
+            );
+            assert!(
+                !calls.iter().any(|c| c.contains("optionId=o_review")),
+                "{calls:?}"
+            );
+            assert!(calls.iter().any(|c| c.starts_with("issue comment 13")));
+            assert!(
+                r.lines.iter().any(|l| l.contains("the Task's trailers")),
+                "{:?}",
+                r.lines
+            );
         }
 
         #[test]
