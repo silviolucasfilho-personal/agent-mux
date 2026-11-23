@@ -1,6 +1,6 @@
 # Projects: every spec-wave flow, in agent-mux — design
 
-Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, and phase 4 in seven parts (§19 to §29), with what each left out named there; nothing else is.
+Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, and phase 4 in eight parts (§19 to §30), with what each left out named there; nothing else is.
 
 **The requirement.** Any repository configured with spec-wave must open in
 agent-mux as a **Project** and work there: every flow spec-wave has, each
@@ -1533,3 +1533,37 @@ Built on 2026-11-23: what §28 left of the fleet.
   and ends with its terminal.
 - **Not built:** dispatch to a named developer from the Development
   screen, and a run held by another machine shown there.
+
+## 30. Phase 4, eighth part, as built
+
+Built on 2026-11-23: insights (§9.1 T6) and an agent on an item (T7).
+
+- **`project insights [<n>] [--scope …]`** (`src/project/insights.rs`,
+  flow `project-insights`, skill `wf-project-insights`, no persona): the
+  four scopes of spec-wave's `insightsService.ts` under shorter names
+  (`progress`, `tech`, `daily`, `brainstorm`; its own names are taken
+  too). `insights::digest` is pure over the cached snapshot: open items
+  per stage, the milestones, and one line per open item (at most 120)
+  that also carries the item's next step or block, which spec-wave's
+  context does not. With an issue number the digest is that item and
+  what is under it. The session may read the repository. The answer is
+  printed and kept per hub and scope under the scratch folder; `I` on
+  any Project screen asks for one or opens the last in the Markdown
+  viewer. Its launch is tagged `step = "insights:<scope>"`, with `item =
+  0` for a reading of the whole Project, so it is not in any item's
+  trace. Nothing is written to GitHub and no issue comes from a
+  brainstorm's idea; spec-wave's selectable ideas panel is not built.
+- **An agent on an item** (`a`, not §12's `A`, which is the board's
+  catch-up since phase 2): `ProjectView.agents` lists the personas of
+  the library, the hub's `.agent-mux/agents/` and the built-in ones (an
+  agent with a `[task]` is left out: it runs its own task).
+  `App::project_agent` starts an interactive session as the one picked,
+  applying its launch plan as the New session dialog does
+  (`App::session_agent`), with `app::project::agent_opening` as the
+  first message and no `/project` skill. §9.1 says "headless or
+  interactive, as the agent says"; only interactive is built. The launch
+  carries `metadata.agent` and `metadata.project` with `role = "agent"`
+  and `step = "agent:<name>"`.
+- **Left of phase 4**, all from §9.3: tokens and cost on the cards, the
+  Observability screen, Heimdall's `projects` section, and the timeline
+  view of `trace project`.

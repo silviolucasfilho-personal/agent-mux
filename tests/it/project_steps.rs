@@ -44,6 +44,8 @@ const PLAN_JSON: &str = r##"{"document":"# Estratégia Técnica\n# Detalhamento 
 const FINDINGS_JSON: &str =
     r#"{"findings":[{"severity":"menor","anchor":"Backend","text":"ordem das seções"}]}"#;
 
+const INSIGHT_JSON: &str =
+    r#"{"text":"Uma Story pronta, nada bloqueado.","actions":["Construir #12"]}"#;
 const ESTIMATE_JSON: &str =
     r#"{"points":6,"rationale":"duas telas e uma migração","risks":["API de pagamentos"]}"#;
 const REFINED_JSON: &str = r###"{"body":"## Objetivo\nVer os pedidos do mês\n\n## Critérios de aceite\n- lista paginada\n\nDepende de: #9","changes":["organizado em seções"],"questions":["qual o tamanho da página?"]}"###;
@@ -88,6 +90,8 @@ case "$AGENT_MUX_WORKFLOW_STEP" in
 esac
 if grep -q '"findings"' "$AGENT_MUX_WORKFLOW_CONTEXT"; then
   emit '{findings}'
+elif grep -q '"digest"' "$AGENT_MUX_WORKFLOW_CONTEXT"; then
+  emit '{insight}'
 elif grep -q '"rationale"' "$AGENT_MUX_WORKFLOW_CONTEXT"; then
   emit '{estimate}'
 elif grep -q '"questions"' "$AGENT_MUX_WORKFLOW_CONTEXT"; then
@@ -100,6 +104,7 @@ exit 0
         record = record.display(),
         findings = FINDINGS_JSON,
         estimate = ESTIMATE_JSON,
+        insight = INSIGHT_JSON,
         refined = REFINED_JSON,
         plan = PLAN_JSON,
         work = WORK_JSON,
@@ -810,6 +815,65 @@ async fn an_estimate_and_a_refine_are_proposed_and_nothing_is_written() {
             "{flow} must not write"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_insight_reads_the_digest_and_writes_nothing() {
+    use agent_mux::project::insights::{self, Scope};
+    let mut f = fixture();
+    let mut story = feature();
+    story.number = 12;
+    story.title = "[STORY] Ver pedidos".into();
+    story.item_type = Some(ItemType::Story);
+    story.docs.clear();
+    story.stage = Some("✅ Ready".into());
+    let snap = agent_mux::project::Snapshot {
+        hub: "acme/hub".into(),
+        items: vec![story],
+        ..Default::default()
+    };
+    let digest = insights::digest(&snap, None, insights::MAX_ITEMS);
+    assert!(
+        digest.contains("#12 [Story] Ver pedidos | etapa=Ready"),
+        "{digest}"
+    );
+    let result = run_flow(
+        &mut f,
+        insights::FLOW_INSIGHTS,
+        serde_json::json!({"scope": "daily", "digest": digest, "topic": ""}),
+    )
+    .await;
+    assert_eq!(result["text"], "Uma Story pronta, nada bloqueado.");
+    let doc = insights::document(
+        "acme/hub",
+        Scope::Daily,
+        None,
+        result["text"].as_str().unwrap(),
+        &["Construir #12".to_string()],
+        "2026-11-23",
+    );
+    let file = insights::save(&f.root.join("scratch"), "acme/hub", Scope::Daily, &doc).unwrap();
+    assert!(
+        std::fs::read_to_string(file)
+            .unwrap()
+            .contains("- Construir #12")
+    );
+    // the session was given the digest, and nothing reached GitHub or the checkout
+    let given = std::fs::read_dir(f.bin.join("calls"))
+        .unwrap()
+        .filter_map(|e| std::fs::read_to_string(e.unwrap().path()).ok())
+        .any(|t| t.contains("Itens abertos por etapa"));
+    assert!(given, "the digest was not passed to the session");
+    assert!(std::fs::read_to_string(f.root.join("gh-calls")).is_err());
+    assert_eq!(
+        git(&f.hub, &["status", "--porcelain", "--untracked-files=no"]),
+        ""
+    );
+    assert!(
+        library::builtin(insights::FLOW_INSIGHTS)
+            .unwrap()
+            .contains("isolation = \"none\"")
+    );
 }
 
 #[test]

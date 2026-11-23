@@ -29,6 +29,7 @@ pub mod doctor;
 pub mod fix_pr;
 pub mod fleet;
 pub mod github;
+pub mod insights;
 pub mod launch;
 pub mod lease;
 pub mod merge;

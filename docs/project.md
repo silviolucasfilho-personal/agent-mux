@@ -56,6 +56,8 @@ The left column holds the screens and, under them, the selected screen's rows. T
 | `E` | Estimate the item in story points; with a proposal waiting, write it |
 | `W` | Propose a clearer description of the item; with a proposal waiting, write it |
 | `c` | Talk about the item: an interactive session with the item as its opening message |
+| `a` | Run one of your agents on the item: pick it, and an interactive session starts as that agent |
+| `I` | Insights: ask for a reading of the Project, or open the last one |
 
 **The item screen** (`Enter` on an item) has six tabs: Card, Documents, Children, Pull requests, Thread and Trace. `Enter` opens what the cursor is on: a document on the default branch in the Markdown viewer (from the hub's checkout), a document still in review as its pull request in the browser, a child as its own item screen, a pull request in the browser, a run of a step on the Run screen. `Esc` goes back.
 
@@ -295,6 +297,19 @@ agent-mux project estimate|refine <n> --discard
 
 Any session in a spec-wave repository may invoke `/project` by hand (`$project` on Codex).
 
+**As one of your agents.** `a` on an item lists your personas (the agents of `~/.agent-mux/agents/` and of the hub's `.agent-mux/agents/`, and the built-in ones; an agent with a task or a schedule of its own is not listed). The session starts as the one you pick, with its instructions, tools and model, and the item's card as its first message in place of the `/project` skill. It is told to change nothing on GitHub before you say yes. It is part of the item's trace with the role `agent`.
+
+### Insights
+
+```
+agent-mux project insights                          where the Project stands (scope progress)
+agent-mux project insights --scope tech|daily|brainstorm [--topic "…"]
+agent-mux project insights <n> --scope tech         the same, for one item and what is under it
+agent-mux project insights --dry-run                what the session would be given
+```
+
+A read-only session (flow `project-insights`) is given a digest of the Project as agent-mux last read it: open items per stage, the milestones, and one line per open item with its stage, priority, pull requests and next step or block. It answers a short reading in Markdown for the scope asked: `progress` (milestones at risk, bottlenecks, three recommendations), `tech` (what is stuck in spec or plan, blocked items, pull requests waiting), `daily` (what is going and the next Story) or `brainstorm` (ideas for the backlog). The answer is printed and kept as a file; `I` on the screens asks for one or opens the last. Nothing is written to GitHub, and no issue is created from an idea.
+
 ### The sessions of an item
 
 Every session a step starts records the work item it runs for on its launch row (`launches.metadata.project`: hub, item, type, Feature, step, attempt, role, run). One command reads them back as one trace:
@@ -363,6 +378,7 @@ agent-mux project dispatch <n> [--harness H] [--to <login>]
 agent-mux project cancel <n>
 agent-mux project fleet status [--json]
 agent-mux project fleet run [--once] [--dispatch <n>] [--max-runs N] [--max-failures N] [--poll SECONDS] [--label] [--delivery pr-stack|agent]
+agent-mux project insights [<n>] [--scope progress|tech|daily|brainstorm] [--topic "…"] [--harness H] [--dry-run]
 agent-mux project estimate <n> [--yes] [--discard] [--harness H] [--dry-run] [--json]
 agent-mux project refine <n> [--yes] [--discard] [--harness H] [--dry-run] [--json]
 agent-mux project run <n> [--step …] [--harness H] [--critic H] [--dry-run] [--apply] [--ignore-dependencies] [--keep-drafts]

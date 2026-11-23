@@ -1,0 +1,32 @@
+# A step of the Projects flow (docs/project.md): one read-only session.
+# The session writes nothing: it answers a short reading of where the
+# Project stands, which agent-mux shows. It never approves, creates or
+# changes anything.
+[workflow]
+name = "project-insights"
+description = "Read where a Project stands and say what matters: progress, what is stuck, what to do next, or ideas for the backlog."
+when_to_use = "Started by `agent-mux project insights` and by `I` on the Project screens."
+output = "work"
+default_isolation = "none"
+
+[args.scope]
+description = "What is asked: progress, tech, daily or brainstorm."
+required = true
+[args.digest]
+description = "The Project as agent-mux last read it: counts per stage, milestones, and one line per open item."
+required = true
+[args.topic]
+description = "What a brainstorm is about, when the operator said."
+default = ""
+
+[schemas.insight]
+fields.text = { type = "string", required = true }
+fields.actions = { type = "array", items = "string" }
+
+[[steps]]
+id = "work"
+phase = "Work"
+skill = "wf-project-insights"
+isolation = "none"
+args = { scope = "{args.scope}", digest = "{args.digest}", topic = "{args.topic}" }
+result = "insight"

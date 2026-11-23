@@ -82,7 +82,7 @@ fn flows_live_in_the_library_not_the_agents_sidebar() {
     assert_eq!(app.sidebar_section, SidebarSection::Active);
     assert_eq!(
         app.workflow_list.len(),
-        22,
+        23,
         "the built-ins are listed from the start"
     );
 

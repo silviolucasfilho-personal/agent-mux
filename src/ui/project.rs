@@ -1058,6 +1058,7 @@ fn draw_foot(f: &mut Frame, area: Rect, v: &ProjectView) {
         pairs.extend([
             ("m", "move"),
             ("c", "chat"),
+            ("a", "agent"),
             ("E", "estimate"),
             ("W", "refine"),
             ("o", "issue in browser"),
@@ -1083,6 +1084,7 @@ fn draw_foot(f: &mut Frame, area: Rect, v: &ProjectView) {
             pairs.extend([("M", "repair"), ("A", "catch up board")]);
         }
         pairs.extend([
+            ("I", "insights"),
             ("/", "filter"),
             ("o", "browser"),
             ("Ctrl+R", "reload"),
