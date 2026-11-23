@@ -1,6 +1,6 @@
 # Projects: every spec-wave flow, in agent-mux — design
 
-Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, and phase 4 in six parts (§19 to §28), with what each left out named there; nothing else is.
+Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, and phase 4 in seven parts (§19 to §29), with what each left out named there; nothing else is.
 
 **The requirement.** Any repository configured with spec-wave must open in
 agent-mux as a **Project** and work there: every flow spec-wave has, each
@@ -1484,3 +1484,52 @@ schema v31 (`project_dispatches`).
 - **Left of phase 4:** from §9.3 the cards' tokens and cost, the
   Observability screen and Heimdall's `projects` section; from §9.1
   `project-insights` and agents on an item.
+
+## 29. Phase 4, seventh part, as built
+
+Built on 2026-11-23: what §28 left of the fleet.
+
+- **`[project.fleet]`** (`config::FleetConfig`, `resolve_fleet`):
+  `max_runs`, `max_failures`, `delivery`, `label`, `queue_label`,
+  `request`. §8.4 turns each source on or off; `screen` has no switch,
+  since it is the operator's own key. A flag of `fleet run` wins.
+- **The `request` source** (`fleet::request_comment`, `parse_request`,
+  `cli::take_requests`): `project dispatch <n> --to <login>` writes a
+  comment with the marker `<!-- agent-mux:dispatch to=<login>
+  [harness=<h>] -->` and keeps a local row whose `target` is the login
+  (shown as "waiting for <login>", never started here). The named
+  developer's runner reads every issue comment of the hub since its last
+  look in one call (`github::comments_since`; the first look reads one
+  day back), takes a request addressed to its `gh` login when the
+  comment's author may triage the hub (the factory's check), and keeps
+  the ids it took so a comment is taken once. `cancel` writes the marker
+  with `cancel`. `spec-wave-agent` does not read the marker: a named
+  agent has to run agent-mux.
+- **The `label` source** (`fleet::labelled`): open items of a type the
+  fleet runs that carry `queue_label` and have no row, each dispatched
+  only when the login that added the label may triage the hub
+  (`factory::intake::labeler`, `permission`). One label, not the tracks
+  of `devAgent.queues`. The label is read from the cached snapshot, so a
+  new label is seen when the cache is next refreshed.
+- **`delivery = "agent"`** (`build::AgentDelivery`, `as_checkpoint`,
+  `Ctx::checkpoint_finish`): `project run <feature> --delivery agent`
+  walks the pending Stories as the stack does, and each approved Story
+  is pushed to `agent/issue-<n>` as a checkpoint; the Feature's one pull
+  request is opened after the last, as a draft, with a body that names
+  the Stories and no closing keyword (`agent_pr_body`). Each Story is
+  still reviewed by a second session before its checkpoint, which the
+  daemon does not do. The branch is the same name the daemon uses, so a
+  run that the daemon started is continued, and the lease keeps the two
+  from working it at once. Because the pull request closes nothing,
+  GitHub links it to no issue: the runner reads its URL from the run's
+  output (`cli::opened_pr`) to move the card to Review, and `project
+  merge` does not find it. A cross-repository Story is refused.
+- **Rounds** (`max_rounds`, "no progress") are not built: a run is one
+  pass over the Feature's pending Stories, and a failed run is retried
+  from where it stopped.
+- **The process group.** The runner starts each run in a group of its
+  own and stops the group (`cli::stop_run`: `TERM`, then `KILL`).
+  `session.rs` is unchanged: a harness is a child of the run's process
+  and ends with its terminal.
+- **Not built:** dispatch to a named developer from the Development
+  screen, and a run held by another machine shown there.

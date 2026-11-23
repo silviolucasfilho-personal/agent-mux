@@ -529,6 +529,36 @@ pub(crate) fn pull_list(
     .map(|v| v.as_array().cloned().unwrap_or_default())
 }
 
+/// Every issue comment of `repo` created or changed since `since` (ISO
+/// 8601), oldest first: one read for the whole repository. Each is `{id,
+/// author, issue, body}`.
+pub fn comments_since(
+    tools: &Tools,
+    cwd: &Path,
+    repo: &str,
+    since: &str,
+) -> Result<Vec<Value>, String> {
+    let what = "gh api (issue comments)";
+    let out = gh(
+        tools,
+        cwd,
+        &[
+            "api",
+            "--paginate",
+            &format!(
+                "repos/{repo}/issues/comments?since={since}&sort=updated&direction=asc&per_page=100"
+            ),
+            "--jq",
+            r#".[] | {id, author: .user.login, issue: (.issue_url | split("/") | last | tonumber), body}"#,
+        ],
+        what,
+    )?;
+    out.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| json(l, what))
+        .collect()
+}
+
 /// The files two levels under `docs/features`, `docs/bugs` and `docs/rfcs`
 /// on the default branch: `docs/features/<slug>/spec.md`.
 fn doc_files(tools: &Tools, cwd: &Path, repo: &RepoRef) -> Result<Vec<String>, String> {

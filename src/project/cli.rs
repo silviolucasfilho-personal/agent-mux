@@ -45,15 +45,16 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
         the folders of the code repositories an item changes (a Feature gathers its
         Stories'): `map` only says where each is; `prepare` clones the ones missing
         under the hub's .spec-wave/repos and writes .spec-wave/workspace-<n>.json
-  agent-mux project dispatch <n> [--harness H]
+  agent-mux project dispatch <n> [--harness H] [--to <login>]
         hand an item to the fleet: its card goes to WIP and a run starts when a
-        slot is free and `project fleet run` is going
+        slot is free and `project fleet run` is going. With --to, it is handed to
+        that developer by a comment on the issue, and their fleet runs it
   agent-mux project cancel <n>
         take a dispatched item back to Backlog; a run in progress is stopped
   agent-mux project fleet status [--json]
         the slots, each dispatched item's card, and who holds which item (the
         claims on the hub's remote, this machine's and anyone else's)
-  agent-mux project fleet run [--once] [--dispatch <n>] [--max-runs N] [--max-failures N] [--poll SECONDS]
+  agent-mux project fleet run [--once] [--dispatch <n>] [--max-runs N] [--max-failures N] [--poll SECONDS] [--label] [--delivery pr-stack|agent]
         run the dispatched items, at most N at a time (3), each as `project run <n>`
         under a lease on the hub's remote; --once ends when nothing is left to run
 
@@ -66,7 +67,7 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
         and every line tools read; --yes replaces the issue's description with the
         proposal that is waiting, unless the description changed since
 
-  agent-mux project run <n> [--step spec|plan|bug|critique|validate|build|fix|fix-pr] [--harness H] [--critic H] [--dry-run] [--apply] [--ignore-dependencies] [--keep-drafts]
+  agent-mux project run <n> [--step spec|plan|bug|critique|validate|build|fix|fix-pr] [--harness H] [--critic H] [--dry-run] [--apply] [--ignore-dependencies] [--keep-drafts] [--delivery pr-stack|agent]
         run the item's next document step: a read-only session writes the document,
         agent-mux publishes it by pull request and comments on the issue; a plan and
         a bug document are then audited by a second session; a decomposition is
@@ -118,6 +119,8 @@ const VALUE_FLAGS: &[&str] = &[
     "--max-failures",
     "--dispatch",
     "--poll",
+    "--to",
+    "--delivery",
 ];
 
 struct Args {
@@ -651,6 +654,40 @@ fn cmd_dispatch(a: &Args) -> anyhow::Result<()> {
     let s = snap(&e)?;
     let d = fleet::dispatch(&e.conn, &s, n, harness.map(|h| h.as_str()), super::now_ns())
         .map_err(|x| anyhow::anyhow!(x))?;
+    if let Some(to) = a
+        .value("--to")
+        .map(|t| t.trim_start_matches('@').to_string())
+    {
+        // handed to a named developer: the request is a comment on the
+        // issue, which their agent-mux reads; nothing runs here
+        if to.is_empty() || !to.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            fleet::remove(&e.conn, &s.hub, n).map_err(|x| anyhow::anyhow!(x))?;
+            anyhow::bail!("\"{to}\" is not a login");
+        }
+        let mut d = d;
+        d.target = to.clone();
+        let asked = super::write::comment(
+            &e.tools,
+            &e.cfg,
+            n,
+            &fleet::request_comment(&to, d.harness.as_deref(), false),
+        );
+        if let Err(why) = asked {
+            fleet::remove(&e.conn, &s.hub, n).map_err(|x| anyhow::anyhow!(x))?;
+            anyhow::bail!(
+                "#{n} was not dispatched: the request was not written on the issue: {why}"
+            );
+        }
+        fleet::save(&e.conn, &d).map_err(|x| anyhow::anyhow!(x))?;
+        println!(
+            "#{n}: dispatched to @{to} by a comment on the issue ({})",
+            d.line(super::now_ns())
+        );
+        println!(
+            "  it starts when their `agent-mux project fleet run` next looks; `project fleet status` shows the claim once it has"
+        );
+        return Ok(());
+    }
     println!(
         "#{n}: dispatched to the fleet ({})",
         d.line(super::now_ns())
@@ -670,6 +707,25 @@ fn cmd_cancel(a: &Args) -> anyhow::Result<()> {
     let e = env(a)?;
     let n = number(a)?;
     let hub = e.cfg.hub_repo().slug();
+    // a request to a named developer is taken back where it was made
+    if let Some(d) = fleet::get(&e.conn, &hub, n)
+        .map_err(|x| anyhow::anyhow!(x))?
+        .filter(|d| !d.for_fleet())
+    {
+        super::write::comment(
+            &e.tools,
+            &e.cfg,
+            n,
+            &fleet::request_comment(&d.target, None, true),
+        )
+        .map_err(|x| anyhow::anyhow!("#{n}: the request was not taken back on the issue: {x}"))?;
+        fleet::remove(&e.conn, &hub, n).map_err(|x| anyhow::anyhow!(x))?;
+        println!(
+            "#{n}: the request to @{} was taken back; the card is in Backlog",
+            d.target
+        );
+        return Ok(());
+    }
     let running =
         fleet::cancel(&e.conn, &hub, n, super::now_ns()).map_err(|x| anyhow::anyhow!(x))?;
     if !running {
@@ -704,14 +760,28 @@ fn lease_repo(cfg: &ProjectConfig) -> Result<super::lease::LeaseRepo, String> {
 /// `project fleet status|run`.
 fn cmd_fleet(a: &Args) -> anyhow::Result<()> {
     use super::fleet;
-    let max_runs: usize = match a.value("--max-runs") {
-        Some(v) => v
+    // `[project.fleet]` of the settings file; a flag wins over it
+    let mut settings = crate::config::load()
+        .map_err(|e| e.to_string())
+        .and_then(|c| crate::config::resolve_fleet(c.project.as_ref()))
+        .map_err(|x| anyhow::anyhow!(x))?;
+    if let Some(v) = a.value("--max-runs") {
+        settings.max_runs = v
             .parse()
             .ok()
             .filter(|n| *n > 0)
-            .ok_or_else(|| anyhow::anyhow!("--max-runs takes a number above zero"))?,
-        None => fleet::MAX_RUNS,
-    };
+            .ok_or_else(|| anyhow::anyhow!("--max-runs takes a number above zero"))?;
+    }
+    match a.value("--delivery") {
+        None => {}
+        Some("pr-stack") => settings.agent_delivery = false,
+        Some("agent") => settings.agent_delivery = true,
+        Some(other) => anyhow::bail!("--delivery {other:?}: use pr-stack or agent"),
+    }
+    if a.flag("--label") {
+        settings.label = true;
+    }
+    let max_runs = settings.max_runs;
     match a.positional.first().map(String::as_str) {
         Some("status") => {
             let e = env(a)?;
@@ -770,13 +840,12 @@ fn cmd_fleet(a: &Args) -> anyhow::Result<()> {
             Ok(())
         }
         Some("run") => {
-            let max_failures: u32 =
-                match a.value("--max-failures") {
-                    Some(v) => v.parse().ok().filter(|n| *n > 0).ok_or_else(|| {
+            if let Some(v) = a.value("--max-failures") {
+                settings.max_failures =
+                    v.parse().ok().filter(|n| *n > 0).ok_or_else(|| {
                         anyhow::anyhow!("--max-failures takes a number above zero")
-                    })?,
-                    None => fleet::MAX_FAILURES,
-                };
+                    })?;
+            }
             let poll: u64 = match a.value("--poll") {
                 Some(v) => v
                     .parse()
@@ -785,10 +854,119 @@ fn cmd_fleet(a: &Args) -> anyhow::Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("--poll takes seconds above zero"))?,
                 None => 5,
             };
-            fleet_run(a, max_runs, max_failures, poll)
+            fleet_run(a, &settings, poll)
         }
         _ => anyhow::bail!("usage: agent-mux project fleet status|run"),
     }
+}
+
+/// Stops a run and everything in its process group: the group is asked to
+/// end, then the run's own process is killed and reaped.
+fn stop_run(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", "--", &format!("-{}", child.id())])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", child.id())])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// The `request` source: dispatches addressed to `me` in comments on the
+/// hub's issues since the last look, by someone who may triage the hub.
+/// Best effort: a read that fails is a line, and the next look asks again
+/// from the same point.
+fn take_requests(e: &Env, s: &Snapshot, hub: &str, root: &Path, me: &str, cursor: &Path) {
+    use super::fleet;
+    use crate::factory::intake;
+    let rfc = |ns: i64| {
+        time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(ns))
+            .ok()
+            .and_then(|t| {
+                t.replace_nanosecond(0)
+                    .ok()?
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .ok()
+            })
+            .unwrap_or_default()
+    };
+    // `{since, seen}`: where the last look ended and the comments it took
+    let saved: Value = std::fs::read_to_string(cursor)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(Value::Null);
+    let started = super::now_ns();
+    let since = saved
+        .get("since")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        // a first look reads the last day, not the repository's history
+        .unwrap_or_else(|| rfc(started - 86_400 * 1_000_000_000));
+    let mut seen: Vec<u64> = saved
+        .get("seen")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_u64).collect())
+        .unwrap_or_default();
+    let comments = match super::github::comments_since(&e.tools, root, hub, &since) {
+        Ok(c) => c,
+        Err(why) => {
+            eprintln!("requests were not read: {why}");
+            return;
+        }
+    };
+    let mut taken: Vec<u64> = Vec::new();
+    for c in &comments {
+        let (Some(id), Some(n)) = (
+            c.get("id").and_then(Value::as_u64),
+            c.get("issue").and_then(Value::as_u64),
+        ) else {
+            continue;
+        };
+        taken.push(id);
+        if seen.contains(&id) {
+            continue;
+        }
+        let Some(req) = fleet::parse_request(c.get("body").and_then(Value::as_str).unwrap_or(""))
+        else {
+            continue;
+        };
+        if !req.to.eq_ignore_ascii_case(me) {
+            continue;
+        }
+        let author = c.get("author").and_then(Value::as_str).unwrap_or("");
+        let may = !author.is_empty()
+            && intake::permission(&e.tools, root, hub, author)
+                .is_ok_and(|role| intake::may_request(&role));
+        if !may {
+            println!("#{n}: a dispatch to you by {author}, who may not triage {hub}: not taken");
+            continue;
+        }
+        let now = super::now_ns();
+        if req.cancel {
+            if fleet::cancel(&e.conn, hub, n, now).is_ok() {
+                println!("#{n}: {author} took the dispatch back");
+            }
+            continue;
+        }
+        match fleet::dispatch(&e.conn, s, n, req.harness.as_deref(), now) {
+            Ok(_) => println!("#{n}: dispatched to you by {author}"),
+            Err(why) => println!("#{n}: a dispatch by {author} was not taken: {why}"),
+        }
+    }
+    seen = taken;
+    let _ = std::fs::write(
+        cursor,
+        json!({ "since": rfc(started), "seen": seen }).to_string(),
+    );
 }
 
 /// One run the runner holds.
@@ -798,6 +976,17 @@ struct FleetRun {
     lease: super::lease::Lease,
     renewed: std::time::Instant,
     log: PathBuf,
+}
+
+/// The last pull request a run's output says it opened.
+fn opened_pr(log: &Path) -> Option<String> {
+    std::fs::read_to_string(log)
+        .ok()?
+        .lines()
+        .rev()
+        .find_map(|l| l.trim().strip_prefix(super::build::OPENED_PR))
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
 }
 
 /// The last line of a run's output that says why it ended.
@@ -814,9 +1003,10 @@ fn last_word(log: &Path) -> String {
 
 /// The runner: starts what the dispatcher says, keeps each run's lease
 /// beating, and records how each ended. One runner per hub on a machine.
-fn fleet_run(a: &Args, max_runs: usize, max_failures: u32, poll: u64) -> anyhow::Result<()> {
+fn fleet_run(a: &Args, settings: &crate::config::FleetSettings, poll: u64) -> anyhow::Result<()> {
     use super::{fleet, lease};
     use crate::factory::intake;
+    let (max_runs, max_failures) = (settings.max_runs, settings.max_failures);
     let mut e = env(a)?;
     let hub = e.cfg.hub_repo().slug();
     let root = e.cfg.root().to_path_buf();
@@ -850,6 +1040,14 @@ fn fleet_run(a: &Args, max_runs: usize, max_failures: u32, poll: u64) -> anyhow:
     let logs = runtime.join("project-fleet");
     std::fs::create_dir_all(&logs)?;
     println!("fleet of {hub}: up to {max_runs} run(s) at once, as {owner}");
+    if settings.label {
+        println!("  taking issues labelled `{}`", settings.queue_label);
+    }
+    let me = login.trim().to_string();
+    let cursor = logs.join(format!("{}.requests", fleet_name(&hub)));
+    // issues whose label was added by someone who may not hand out work
+    let mut refused: Vec<u64> = Vec::new();
+    let mut looked: Option<std::time::Instant> = None;
     let once = a.flag("--once");
     let mut runs: Vec<FleetRun> = Vec::new();
     loop {
@@ -863,8 +1061,7 @@ fn fleet_run(a: &Args, max_runs: usize, max_failures: u32, poll: u64) -> anyhow:
                 .is_none_or(|d| d.state == fleet::State::Cancelled);
             if cancelled {
                 let mut r = runs.remove(i);
-                let _ = r.child.kill();
-                let _ = r.child.wait();
+                stop_run(&mut r.child);
                 leases.release(r.item);
                 let _ = fleet::remove(&e.conn, &hub, r.item);
                 println!("#{}: cancelled; its run was stopped", r.item);
@@ -881,7 +1078,10 @@ fn fleet_run(a: &Args, max_runs: usize, max_failures: u32, poll: u64) -> anyhow:
                     let pr = fresh
                         .as_ref()
                         .and_then(|s| s.item(r.item))
-                        .and_then(|it| it.pulls.iter().find(|p| p.open()).map(|p| p.url.clone()));
+                        .and_then(|it| it.pulls.iter().find(|p| p.open()).map(|p| p.url.clone()))
+                        // a Feature's one pull request closes nothing, so
+                        // GitHub links it to no issue: the run says it
+                        .or_else(|| opened_pr(&r.log));
                     if let Ok(Some(mut d)) = fleet::get(&e.conn, &hub, r.item) {
                         fleet::settle(
                             &mut d,
@@ -924,8 +1124,7 @@ fn fleet_run(a: &Args, max_runs: usize, max_failures: u32, poll: u64) -> anyhow:
                 Err(lease::RenewError::Lost(why)) => {
                     // fencing: the run stops at once and nothing is released or pushed
                     let mut r = runs.remove(i);
-                    let _ = r.child.kill();
-                    let _ = r.child.wait();
+                    stop_run(&mut r.child);
                     if let Ok(Some(mut d)) = fleet::get(&e.conn, &hub, r.item) {
                         fleet::block(
                             &mut d,
@@ -949,8 +1148,7 @@ fn fleet_run(a: &Args, max_runs: usize, max_failures: u32, poll: u64) -> anyhow:
                         lease::is_expired(runs[i].lease.heartbeat_ns(), now, lease::TTL_SECS);
                     if stale {
                         let mut r = runs.remove(i);
-                        let _ = r.child.kill();
-                        let _ = r.child.wait();
+                        stop_run(&mut r.child);
                         if let Ok(Some(mut d)) = fleet::get(&e.conn, &hub, r.item) {
                             fleet::block(
                                 &mut d,
@@ -965,9 +1163,56 @@ fn fleet_run(a: &Args, max_runs: usize, max_failures: u32, poll: u64) -> anyhow:
                 }
             }
         }
-        // 3. what the dispatcher says
+        // 3. where work comes from besides the screen: at most once a minute,
+        // since each asks GitHub
         e.fresh = Fresh::Auto;
         let s = snap(&e)?;
+        if (settings.label || settings.request)
+            && looked.is_none_or(|t| t.elapsed().as_secs() >= 60)
+        {
+            looked = Some(std::time::Instant::now());
+            if settings.label {
+                let ds = fleet::list(&e.conn, &hub).map_err(|x| anyhow::anyhow!(x))?;
+                for n in fleet::labelled(&s, &ds, &settings.queue_label) {
+                    if refused.contains(&n) {
+                        continue;
+                    }
+                    let who = intake::labeler(
+                        &e.tools,
+                        &root,
+                        &hub,
+                        &n.to_string(),
+                        &settings.queue_label,
+                    )
+                    .ok()
+                    .flatten();
+                    let may = who.as_deref().is_some_and(|login| {
+                        intake::permission(&e.tools, &root, &hub, login)
+                            .is_ok_and(|role| intake::may_request(&role))
+                    });
+                    if !may {
+                        refused.push(n);
+                        println!(
+                            "#{n}: labelled `{}` by {}, who may not triage {hub}: not dispatched",
+                            settings.queue_label,
+                            who.as_deref().unwrap_or("nobody its events name")
+                        );
+                        continue;
+                    }
+                    if fleet::dispatch(&e.conn, &s, n, None, super::now_ns()).is_ok() {
+                        println!(
+                            "#{n}: dispatched by the label `{}` ({} added it)",
+                            settings.queue_label,
+                            who.as_deref().unwrap_or("?")
+                        );
+                    }
+                }
+            }
+            if settings.request {
+                take_requests(&e, &s, &hub, &root, &me, &cursor);
+            }
+        }
+        // 4. what the dispatcher says
         let ds = fleet::list(&e.conn, &hub).map_err(|x| anyhow::anyhow!(x))?;
         let mine: Vec<u64> = runs.iter().map(|r| r.item).collect();
         let cards = fleet::cards(&ds, &s, |_| false)
@@ -1044,6 +1289,18 @@ fn fleet_run(a: &Args, max_runs: usize, max_failures: u32, poll: u64) -> anyhow:
                         .stdin(std::process::Stdio::null())
                         .stdout(out)
                         .stderr(err);
+                    // a group of its own, so stopping the run stops what it started
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::CommandExt;
+                        cmd.process_group(0);
+                    }
+                    let feature = s
+                        .item(n)
+                        .is_some_and(|i| i.item_type == Some(ItemType::Feature));
+                    if settings.agent_delivery && feature {
+                        cmd.args(["--delivery", "agent"]);
+                    }
                     if let Some(h) = &d.harness {
                         cmd.args(["--harness", h]);
                     }
@@ -1437,6 +1694,18 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
                 for line in super::stack::plan_lines(&p) {
                     println!("  {line}");
                 }
+                // the fleet's other delivery: one branch, one pull request
+                let agent = match a.value("--delivery") {
+                    None | Some("pr-stack") => false,
+                    Some("agent") => true,
+                    Some(other) => anyhow::bail!("--delivery {other:?}: use pr-stack or agent"),
+                };
+                if agent {
+                    println!(
+                        "  delivery: agent. Every Story is a checkpoint on `{}`, and the Feature gets one pull request after the last",
+                        super::build::agent_branch(n)
+                    );
+                }
                 if a.flag("--dry-run") {
                     break;
                 }
@@ -1444,6 +1713,22 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
                 // code review with its pull request, for the next one's base
                 let mut seen = s.clone();
                 let total = p.pending.len();
+                if agent {
+                    // Stories checkpointed by an earlier run have no pull
+                    // request of their own: their code is on the one branch
+                    let branch = super::build::agent_branch(n);
+                    for st in &p.skipped {
+                        let Some(it) = seen.items.iter_mut().find(|x| x.number == st.number) else {
+                            continue;
+                        };
+                        if it.open
+                            && !it.pulls.iter().any(|p| p.open())
+                            && let Ok(target) = super::build::target_repo(&hub_root, &e.cfg, it)
+                        {
+                            it.pulls.push(checkpoint_pull(&target.repo.slug(), &branch));
+                        }
+                    }
+                }
                 for (i, st) in p.pending.iter().enumerate() {
                     println!("\n  [{}/{total}] Story #{} {}", i + 1, st.number, st.title);
                     let stopped = |why: String| {
@@ -1462,6 +1747,33 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
                                 .map(|p| (d, p))
                         });
                     let (detail, b) = match planned {
+                        Ok((d, Planned::Build(mut b))) if agent => {
+                            let branch = super::build::agent_branch(n);
+                            let made = crate::factory::deliver::free_branch(&b.target.dir, &branch)
+                                .map(|free| free != branch)
+                                .and_then(|on_remote| {
+                                    super::build::as_checkpoint(
+                                        &mut b,
+                                        super::build::AgentDelivery {
+                                            feature: n,
+                                            feature_title: item.title.clone(),
+                                            stories: p
+                                                .order
+                                                .iter()
+                                                .copied()
+                                                .filter(|x| seen.item(*x).is_some_and(|i| i.open))
+                                                .collect(),
+                                            last: i + 1 == total,
+                                        },
+                                        on_remote,
+                                    )
+                                });
+                            if let Err(x) = made {
+                                failed = Some(stopped(x));
+                                break;
+                            }
+                            (d, b)
+                        }
                         Ok((d, Planned::Build(b))) => (d, b),
                         Ok((_, Planned::Stopped(d))) => {
                             for line in decision_lines(&d) {
@@ -1794,6 +2106,11 @@ async fn build_all(
             if !more && b.kind != super::build::BuildKind::Task {
                 it.stage = Some(super::contract::STAGE_CODE_REVIEW.to_string());
             }
+            if url.is_none() && b.agent.is_some() {
+                // a checkpoint: the Story's code is on the Feature's branch
+                it.pulls
+                    .push(checkpoint_pull(&b.target.repo.slug(), &b.branch));
+            }
             if let Some(url) = url {
                 it.pulls.push(super::Pull {
                     repo: b.target.repo.slug(),
@@ -1824,6 +2141,22 @@ async fn build_all(
             _ => return Err(format!("#{} has no build step left", b.number)),
         };
         println!();
+    }
+}
+
+/// What stands in the snapshot for a Story that was checkpointed on its
+/// Feature's one branch: its code is there, with no pull request of its
+/// own yet.
+fn checkpoint_pull(repo: &str, branch: &str) -> super::Pull {
+    super::Pull {
+        repo: repo.to_string(),
+        number: 0,
+        url: String::new(),
+        state: "OPEN".into(),
+        draft: true,
+        head: branch.to_string(),
+        base: String::new(),
+        review: String::new(),
     }
 }
 
