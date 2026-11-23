@@ -2694,6 +2694,9 @@ pub struct App {
     /// (`project::cli::run_flow_in`): every workflow session it starts
     /// records it on its launch row (`metadata.project`).
     pub project_launch: Option<crate::project::ProjectLaunch>,
+    /// The work item the next interactive launch is about (a chat on an
+    /// item): set around the spawn, which takes it.
+    pub(crate) launch_project: Option<crate::project::ProjectLaunch>,
     /// The Library screen as it was when it opened a dialog or an editor:
     /// it comes back when that closes (`App::library_resume`).
     pub(crate) library_return: Option<Box<library::LibraryState>>,
@@ -3007,6 +3010,7 @@ impl App {
             closing_sessions: std::collections::HashSet::new(),
             notice: None,
             launch_agent: None,
+            launch_project: None,
             project_launch: None,
             library_return: None,
             markdown_return: None,
@@ -4313,8 +4317,10 @@ impl App {
             .and_then(|rt| rt.plan_launch(&profile, &dir));
         // the persona this launch runs as, when the dialog set one
         let launch_agent = self.launch_agent.take();
+        let launch_project = self.launch_project.take();
         if let Some(p) = plan.as_mut() {
             p.agent = launch_agent;
+            p.project = launch_project;
         }
         if let (Some(p), Some(skill)) = (plan.as_mut(), skill_id) {
             let harness = crate::harness::Harness::detect(&profile.command)

@@ -52,6 +52,9 @@ The left column holds the screens and, under them, the selected screen's rows. T
 | `f` | Fix what the review of the item's pull request asked for (the fix-pr step) |
 | `P` | Merge: the pull requests of a Feature's Stories in order, or of one Story or Bug |
 | `t` `R` `D` | On a Bug: accept, reject, mark a duplicate |
+| `E` | Estimate the item in story points; with a proposal waiting, write it |
+| `W` | Propose a clearer description of the item; with a proposal waiting, write it |
+| `c` | Talk about the item: an interactive session with the item as its opening message |
 
 **The item screen** (`Enter` on an item) has six tabs: Card, Documents, Children, Pull requests, Thread and Trace. `Enter` opens what the cursor is on: a document on the default branch in the Markdown viewer (from the hub's checkout), a document still in review as its pull request in the browser, a child as its own item screen, a pull request in the browser, a run of a step on the Run screen. `Esc` goes back.
 
@@ -221,6 +224,27 @@ agent-mux project merge <story or bug> --yes   one item's pull request
 
 `P` on a screen shows the same plan from the cache and asks before it starts the command.
 
+### Estimating and refining an item
+
+Two read-only sessions propose something about an item, and **nothing is written until you read the proposal and say yes**:
+
+```
+agent-mux project estimate <n>              propose its effort in story points
+agent-mux project refine <n>                propose a clearer description
+agent-mux project estimate|refine <n> --yes write the proposal that is waiting
+agent-mux project estimate|refine <n> --discard
+```
+
+- **Estimate** (flow `project-estimate`): the session reads the item, what is under it and, for a Feature, its merged spec and plan, and may open the files they name. It answers a number, why, and what could make the item larger. agent-mux fits the number to the options of the board's `Story Points` field (1, 2, 3, 5, 8, 13, 21 when the Project's file does not list them). `--yes` sets that field.
+- **Refine** (flow `project-refine`): the session rewrites the description so that what is asked, for whom and why are explicit, with acceptance criteria as a list. It does not add or remove a requirement; what the original leaves open comes back as questions. agent-mux refuses a proposal that changes a `Depende de:` line, drops an HTML comment or unchecks a box. `--yes` replaces the issue's description, unless it changed since the proposal was made.
+- **The proposal waits** in a file of agent-mux's scratch folder and is shown on the item's card. `E` or `W` on the screens starts the session when nothing waits, and asks to write the proposal when one does. With `--yes` and a proposal waiting, no session runs: what you read is what is written. `--yes` with none runs the session and writes its answer at once.
+
+### Talking about an item
+
+`c` on an item starts an interactive session in the hub's folder, on Claude Code when a profile runs it (else the first traced harness that has one). Its opening message invokes the `/project` skill with the item's number and card. The skill drives `agent-mux project …`: it shows `project next` before any step, asks before anything that writes, and keeps spec-wave's rules (never write `spec.md`, `plan.md` or `bug.md` by hand, never create a Story or Task outside a decomposition, never call `gh issue create` or merge with `gh`). The session opens in the Agents list like any other, and it is part of the item's trace with the role `chat`.
+
+Any session in a spec-wave repository may invoke `/project` by hand (`$project` on Codex).
+
 ### The sessions of an item
 
 Every session a step starts records the work item it runs for on its launch row (`launches.metadata.project`: hub, item, type, Feature, step, attempt, role, run). One command reads them back as one trace:
@@ -237,7 +261,7 @@ The same trace is shown in four more places:
 
 - **The item's Trace tab** (above).
 - **History.** A past session a step started is marked with its item and step (`#412 build`) in the History list and on the History screen, where `p` lists only those sessions. `Enter` resumes one like any other, to ask it what it did.
-- **MCP.** `agent_mux_get_project_item` (`item`, and `hub` when the workspace is not the Project's) answers the report with its sessions grouped into runs, for a session or Heimdall.
+- **MCP.** `agent_mux_get_project_item` (`item`, and `hub` when the workspace is not the Project's) answers the report with its sessions grouped into runs, for a session or Heimdall. Three more tools answer from the cache, with no call to GitHub: `agent_mux_project_list` (`type`, `stage`, `milestone`, `all`), `agent_mux_project_item` (the card and the next step) and `agent_mux_project_next`.
 - **Langfuse.** With Langfuse configured, every turn of a step's session carries `session.id = <hub>#<n>` and the tags `project`, `project:<step>` and `milestone:<m>`, so a work item is one Langfuse session. After a build, a fix or a fix-pr finishes, agent-mux sends the item's **summary trace**: a span for the item and one per run (its sessions, tokens, cost and their trace ids). `agent-mux langfuse export-project <n> [--hub owner/repo] [--dry-run]` sends an item again, or for the first time when its steps ran with Langfuse off.
 
 ## 5. The next step
@@ -284,6 +308,8 @@ agent-mux project triage reject <n> --reason "…"
 agent-mux project triage duplicate <n> --of <original>
 agent-mux project advance [--yes]
 agent-mux project merge <n> [--yes] [--keep-branches] [--dry-run]
+agent-mux project estimate <n> [--yes] [--discard] [--harness H] [--dry-run] [--json]
+agent-mux project refine <n> [--yes] [--discard] [--harness H] [--dry-run] [--json]
 agent-mux project run <n> [--step …] [--harness H] [--critic H] [--dry-run] [--apply] [--ignore-dependencies] [--keep-drafts]
 ```
 

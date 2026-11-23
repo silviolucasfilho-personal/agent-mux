@@ -594,6 +594,52 @@ impl<'a> Ops<'a> {
         Ok(r)
     }
 
+    /// Sets the board's `Story Points` of an item to `points`, one of the
+    /// field's options. The operator confirmed the value.
+    pub fn set_story_points(
+        &self,
+        number: u64,
+        points: &str,
+        r: &mut Report,
+    ) -> Result<(), String> {
+        use super::assist::FIELD_STORY_POINTS;
+        let item = self.read(number)?;
+        let board = self.board()?;
+        let Some(field) = board.fields.get(FIELD_STORY_POINTS) else {
+            return Err(format!(
+                "the board has no `{FIELD_STORY_POINTS}` field: nothing was written"
+            ));
+        };
+        if !field.options.contains_key(points) {
+            let mut have: Vec<&String> = field.options.keys().collect();
+            have.sort_by(|a, b| match (a.parse::<f64>(), b.parse::<f64>()) {
+                (Ok(x), Ok(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+                (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                _ => a.cmp(b),
+            });
+            return Err(format!(
+                "`{FIELD_STORY_POINTS}` has no option {points:?}: it has {}",
+                have.iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        let id = self.board_item(&board, &item)?;
+        write::set_field(
+            self.tools,
+            self.cfg,
+            &board,
+            &id,
+            FIELD_STORY_POINTS,
+            points,
+        )?;
+        r.say(format!("#{number}: {FIELD_STORY_POINTS} → {points}"));
+        r.touch(number);
+        Ok(())
+    }
+
     /// The board around a development step, as spec-wave's `implement`
     /// moves it (`lib/implement-board.mjs` `planBoardMoves`). At the start
     /// the item is in development and In Progress, with its Feature, and

@@ -41,6 +41,15 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
         blocks it: marking a pull request ready is your review. Each merge is a
         merge commit, moves the item to QA, and the branches go at the end
 
+  agent-mux project estimate <n> [--yes] [--discard] [--harness H] [--dry-run]
+        a read-only session proposes the item's effort in story points, fitted to
+        the board's `Story Points` options; --yes writes the proposal that is
+        waiting (or runs and writes at once), --discard drops it
+  agent-mux project refine <n> [--yes] [--discard] [--harness H] [--dry-run]
+        a read-only session proposes a clearer description, keeping what is asked
+        and every line tools read; --yes replaces the issue's description with the
+        proposal that is waiting, unless the description changed since
+
   agent-mux project run <n> [--step spec|plan|bug|critique|validate|build|fix|fix-pr] [--harness H] [--critic H] [--dry-run] [--apply] [--ignore-dependencies] [--keep-drafts]
         run the item's next document step: a read-only session writes the document,
         agent-mux publishes it by pull request and comments on the issue; a plan and
@@ -344,6 +353,8 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
         Some("advance") => cmd_advance(&a),
         Some("merge") => cmd_merge(&a),
         Some("run") => cmd_run(&a).await,
+        Some("estimate") => cmd_assist(&a, super::assist::Kind::Estimate).await,
+        Some("refine") => cmd_assist(&a, super::assist::Kind::Refine).await,
         None | Some("help") | Some("--help") | Some("-h") => {
             println!("{USAGE}");
             Ok(())
@@ -524,6 +535,133 @@ fn cmd_merge(a: &Args) -> anyhow::Result<()> {
     if let Some(why) = stopped {
         anyhow::bail!(why);
     }
+    Ok(())
+}
+
+/// `project estimate|refine <n> [--yes] [--discard] [--harness H] [--json]`:
+/// a read-only session proposes; the proposal waits in a file and is
+/// written only with `--yes`. With `--yes` and a proposal waiting, no
+/// session runs: what the operator read is what is written.
+async fn cmd_assist(a: &Args, kind: super::assist::Kind) -> anyhow::Result<()> {
+    use super::assist::{self, Kind};
+    let mut e = env(a)?;
+    let n = number(a)?;
+    let harness =
+        harness_of(a.value("--harness"), Harness::Claude).map_err(|x| anyhow::anyhow!(x))?;
+    let hub = e.cfg.hub_repo().slug();
+    let hub_root = steps::hub_root(&e.cfg).map_err(|x| anyhow::anyhow!(x))?;
+    let ctx = steps::Ctx {
+        tools: &e.tools,
+        cfg: &e.cfg,
+        scratch: steps::scratch_dir(&crate::tracing::analysis::default_snapshot_dir()),
+        hub_root: hub_root.clone(),
+    };
+    let what = kind.as_str();
+    if a.flag("--discard") {
+        println!(
+            "#{n}: {}",
+            if assist::discard(&ctx.scratch, &hub, n, kind) {
+                format!("the proposed {what} was discarded")
+            } else {
+                format!("no proposed {what} was waiting")
+            }
+        );
+        return Ok(());
+    }
+    let write = |p: &assist::Proposal, s: &Snapshot| -> anyhow::Result<()> {
+        let report = ctx.apply_proposal(p, s).map_err(|x| anyhow::anyhow!(x))?;
+        for line in &report.lines {
+            println!("  {line}");
+        }
+        if let Err(err) = refresh_touched(&e.conn, &e.tools, &e.cfg, &report.touched) {
+            eprintln!(
+                "the cache was not refreshed ({err}); `agent-mux project sync` reads it again"
+            );
+        }
+        Ok(())
+    };
+    // a proposal the operator already read: written as it is, no session
+    if a.flag("--yes")
+        && let Some(p) = assist::load(&ctx.scratch, &hub, n, kind)
+    {
+        let s = snap(&e)?;
+        println!("#{n} {}", p.title);
+        for line in assist::lines(&p, false) {
+            println!("  {line}");
+        }
+        return write(&p, &s);
+    }
+    e.fresh = Fresh::Refresh;
+    let s = snap(&e)?;
+    let item = s
+        .item(n)
+        .ok_or_else(|| anyhow::anyhow!("issue #{n} is not in the Project"))?
+        .clone();
+    println!("#{n} {}", item.title);
+    let detail =
+        super::github::issue_detail(&e.tools, &e.cfg, n).map_err(|x| anyhow::anyhow!(x))?;
+    let args = match kind {
+        Kind::Estimate => ctx.estimate_args(&item, &detail, &s),
+        Kind::Refine => ctx
+            .refine_args(&item, &detail, &s)
+            .map_err(|x| anyhow::anyhow!(x))?,
+    };
+    println!(
+        "  next: {} with the flow {} on {} (a read-only session; nothing is written)",
+        match kind {
+            Kind::Estimate => "estimate its effort",
+            Kind::Refine => "propose a clearer description",
+        },
+        kind.flow(),
+        harness.as_str()
+    );
+    if a.flag("--dry-run") {
+        return Ok(());
+    }
+    let tag = super::ProjectLaunch {
+        hub: s.hub.clone(),
+        item: n,
+        item_type: item.item_type.map(|t| t.as_str().to_string()),
+        feature: s
+            .ancestor(n, ItemType::Feature)
+            .map(|f| f.number)
+            .filter(|f| *f != n),
+        milestone: item.milestone.clone(),
+        step: what.to_string(),
+        attempt: 1,
+        executor: "operator".to_string(),
+        ..Default::default()
+    };
+    let result = run_flow(kind.flow(), &hub_root, harness, args, None, tag)
+        .await
+        .map_err(|x| anyhow::anyhow!(x))?;
+    let now = super::now_ns();
+    let p = match kind {
+        Kind::Estimate => assist::estimate_of(
+            &item,
+            &s.hub,
+            &result,
+            &assist::scale(&e.cfg),
+            harness.as_str(),
+            now,
+        ),
+        Kind::Refine => assist::refined_of(&item, &s.hub, &detail, &result, harness.as_str(), now),
+    }
+    .map_err(|x| anyhow::anyhow!("#{n}: the proposal was not kept: {x}"))?;
+    if a.flag("--json") {
+        println!("{}", serde_json::to_string_pretty(&p)?);
+    } else {
+        for line in assist::lines(&p, true) {
+            println!("  {line}");
+        }
+    }
+    if a.flag("--yes") {
+        return write(&p, &s);
+    }
+    assist::save(&ctx.scratch, &p).map_err(|x| anyhow::anyhow!(x))?;
+    println!(
+        "  nothing was written: `agent-mux project {what} {n} --yes` writes this proposal, `--discard` drops it"
+    );
     Ok(())
 }
 
@@ -1279,7 +1417,7 @@ fn clip(s: &str, max: usize) -> String {
     }
 }
 
-fn decision_json(d: &Decision) -> Value {
+pub(crate) fn decision_json(d: &Decision) -> Value {
     json!({
         "action": d.action.as_str(),
         "reason": d.reason,
@@ -1289,7 +1427,7 @@ fn decision_json(d: &Decision) -> Value {
     })
 }
 
-fn item_json(i: &Item, s: &Snapshot) -> Value {
+pub(crate) fn item_json(i: &Item, s: &Snapshot) -> Value {
     let shown = stage::shown(i);
     let mut v = serde_json::to_value(i).unwrap_or(Value::Null);
     v["shown_stage"] = json!(shown.stage);

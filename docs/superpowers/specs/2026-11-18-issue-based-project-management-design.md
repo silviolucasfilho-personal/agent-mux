@@ -1,6 +1,6 @@
 # Projects: every spec-wave flow, in agent-mux — design
 
-Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, and the first four parts of phase 4 (§19 to §26); nothing else is.
+Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, and the first five parts of phase 4 (§19 to §27); nothing else is.
 
 **The requirement.** Any repository configured with spec-wave must open in
 agent-mux as a **Project** and work there: every flow spec-wave has, each
@@ -1372,3 +1372,55 @@ is the port of spec-wave's `planFeatureImplementation`,
   chat, refine and estimate on an item, the `/project` skill and the
   other MCP tools; from §9.3, the cards' tokens and cost, the
   Observability screen and Heimdall's `projects` section.
+
+## 27. Phase 4, fifth part, as built
+
+Built on 2026-11-23: refine and estimate (§9.1 T6), the chat on an item
+(T7), the `/project` skill and the read-only MCP tools (§13).
+
+- **A proposal is a file, and the yes is a second command**
+  (`src/project/assist.rs`). §9.1 says "the answer is shown, and written
+  to the issue only on the operator's yes". `project estimate|refine <n>`
+  runs the session and saves a `Proposal` under the scratch folder
+  (`<scratch>/proposals/<hub>-<n>-<kind>.json`); `--yes` writes the one
+  that waits without running a session again, so what was read is what
+  is written; `--yes` with none runs and writes at once; `--discard`
+  drops it. The screens show a waiting proposal on the item's card
+  (`ProjectView.proposals`, re-read every two seconds while an item is
+  open) and `E` / `W` ask for one or ask to write it.
+- **`W`, not `R`, refines.** §12 names `R` and `E`; `R` rejects a Bug on
+  the same screens since phase 2.
+- **Estimate** (flow `project-estimate`, skill `wf-project-estimate`,
+  agent `tech-lead`): the value goes to the board's single-select `Story
+  Points` field that spec-wave's CLI creates (`Ops::set_story_points`),
+  fitted to its numeric options (`assist::scale`, `fit`; a tie goes up).
+  spec-wave's server writes a numeric `Estimate` field at once and
+  re-estimates when the spec changes; neither is done here. Any item is
+  estimated, not only a Feature.
+- **Refine** (flow `project-refine`, skill `wf-project-refine`, agent
+  `spec-writer`) rewrites the issue's description; spec-wave's refine
+  works on `spec.md` and `plan.md`, which here are changed by running
+  their step again. `assist::check_refined` refuses an answer that
+  changes the dependencies, drops an HTML comment or unchecks a box, and
+  `Ctx::apply_proposal` refuses to write over a description that changed
+  since (`base_hash`), reading the issue from GitHub at that moment.
+- **`project-insights` is not built.** No flow, no Home entry.
+- **The chat opens in the Agents list**, not in a Live tab of the item
+  screen (`App::project_chat`, `Outcome::Chat`): the Project screen has
+  no session pane. It runs on Claude Code when a profile does, else the
+  first traced harness with one; there is no harness picker. Its launch
+  carries `metadata.project` with `step = "chat"` and `role = "chat"`
+  (`App.launch_project`, taken by the spawn as `launch_agent` is), so it
+  is in `trace project` and has the History badge.
+- **`skills/project`** is a visible built-in skill (`/project`), installed
+  for the chat's harness before it starts. It keeps the rules of §13.
+- **MCP:** `agent_mux_project_list`, `agent_mux_project_item` and
+  `agent_mux_project_next` (`mcp::server`, 28 tools) answer from the
+  cache in the trace store and never call GitHub; a Project that was
+  never read says to run `project sync`. The hub is matched without
+  regard to case.
+- **Not built from §9.1:** T7's design sessions and Agent Studio's
+  custom agents on an item (`A`).
+- **Still not built in phase 4:** `project workspace`, the fleet (§8),
+  and from §9.3 the cards' tokens and cost, the Observability screen and
+  Heimdall's `projects` section.

@@ -181,6 +181,8 @@ pub enum Outcome {
     LoadTrace(u64),
     /// Open this workflow run on the Run screen.
     OpenRun(String),
+    /// Start an interactive session on this item.
+    Chat(u64),
     /// Make this change on GitHub: the operator confirmed it.
     Run(Op),
 }
@@ -209,6 +211,11 @@ pub struct ProjectView {
     pub item: Option<ItemScreen>,
     pub thread: Option<Thread>,
     pub trace: Option<ItemTrace>,
+    /// Where proposals (refine, estimate) wait: the CLI's scratch folder.
+    pub scratch: PathBuf,
+    /// The proposals waiting for the open item, read from `scratch`.
+    pub proposals: Vec<crate::project::assist::Proposal>,
+    proposals_at: Option<Instant>,
     pub checks: Option<Vec<Check>>,
     pub syncing_since: Option<Instant>,
     /// A dialog over the screen: a picker, a line of text, the new-item
@@ -248,6 +255,11 @@ impl ProjectView {
             item: None,
             thread: None,
             trace: None,
+            scratch: crate::project::run::scratch_dir(
+                &crate::tracing::analysis::default_snapshot_dir(),
+            ),
+            proposals: Vec::new(),
+            proposals_at: None,
             checks: None,
             syncing_since: None,
             modal: None,
@@ -427,6 +439,27 @@ impl ProjectView {
             scroll: 0,
             back,
         });
+        self.reload_proposals(true);
+    }
+
+    /// Reads the proposals waiting for the open item, at most every two
+    /// seconds unless `now` is asked for: a step that finished elsewhere
+    /// shows up without a reload.
+    pub fn reload_proposals(&mut self, now: bool) {
+        let due = now
+            || self
+                .proposals_at
+                .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(2));
+        if !due {
+            return;
+        }
+        self.proposals_at = Some(Instant::now());
+        self.proposals = match &self.item {
+            Some(screen) => {
+                crate::project::assist::waiting(&self.scratch, &self.hub(), screen.number)
+            }
+            None => Vec::new(),
+        };
     }
 
     /// How many rows the item screen's current tab lists.
@@ -565,7 +598,7 @@ impl ProjectView {
         let hub_root = self.hub_root();
         if !ctrl
             && let KeyCode::Char(c) = key.code
-            && matches!(c, 'm' | 'M' | 't' | 'R' | 'D' | 'r')
+            && matches!(c, 'm' | 'M' | 't' | 'R' | 'D' | 'r' | 'E' | 'W' | 'c')
         {
             return self.verb_key(c).unwrap_or(Outcome::None);
         }
@@ -693,6 +726,27 @@ impl ProjectView {
         }
         Outcome::None
     }
+}
+
+/// The skill of an interactive session on a work item.
+pub const PROJECT_SKILL: &str = "project";
+
+/// The opening message of a chat on an item: the skill's invocation, the
+/// item, and where it stands, from the cache.
+pub fn chat_opening(invocation: &str, item: &Item, snap: &Snapshot) -> String {
+    let mut l = vec![
+        format!("{invocation} #{}", item.number),
+        String::new(),
+        format!(
+            "I want to talk about work item #{} of {}. This is what agent-mux has cached about it; read it again with `agent-mux project show {}` before you rely on it.",
+            item.number, snap.hub, item.number
+        ),
+        String::new(),
+    ];
+    l.extend(cli::card_lines(item, snap));
+    l.push(String::new());
+    l.push("Start by telling me in a few lines where it stands and what its next step is. Run nothing that writes before I say yes.".to_string());
+    l.join("\n")
 }
 
 /// A change on GitHub, as the operator asked for it.
@@ -842,7 +896,10 @@ impl ProjectView {
 
     /// A verb's key. `None`: the key is not a verb here.
     fn verb_key(&mut self, c: char) -> Option<Outcome> {
-        if !matches!(c, 'n' | 'm' | 'M' | 't' | 'R' | 'D' | 'A' | 'r' | 'f' | 'P') {
+        if !matches!(
+            c,
+            'n' | 'm' | 'M' | 't' | 'R' | 'D' | 'A' | 'r' | 'f' | 'P' | 'E' | 'W' | 'c'
+        ) {
             return None;
         }
         if self.snap.is_none() {
@@ -854,6 +911,68 @@ impl ProjectView {
         let target = self.target().cloned();
         let need = |what: &str| Some(Outcome::Notice(format!("select an item to {what}")));
         match c {
+            'c' => {
+                let Some(it) = target else {
+                    return need("talk about");
+                };
+                return Some(Outcome::Chat(it.number));
+            }
+            'E' | 'W' => {
+                use crate::project::assist::{self, Kind};
+                let Some(it) = target else {
+                    return need(if c == 'E' { "estimate" } else { "refine" });
+                };
+                let kind = if c == 'E' {
+                    Kind::Estimate
+                } else {
+                    Kind::Refine
+                };
+                let what = kind.as_str();
+                let n = it.number;
+                // a proposal that waits is written; with none, one is asked for
+                self.modal = Some(match assist::load(&self.scratch, &self.hub(), n, kind) {
+                    Some(p) => {
+                        let mut lines = vec![format!("Write the proposed {what} of #{n}?")];
+                        lines.extend(assist::lines(&p, false));
+                        lines.push(match kind {
+                            Kind::Estimate => format!(
+                                "It sets `{}` on the board. `agent-mux project estimate {n} --discard` drops the proposal instead.",
+                                assist::FIELD_STORY_POINTS
+                            ),
+                            Kind::Refine => format!(
+                                "It replaces the issue's description, unless it changed since. Read the whole text first: `agent-mux project refine {n} --yes` prints it, and `--discard` drops it."
+                            ),
+                        });
+                        Modal::Confirm {
+                            lines,
+                            op: Op::Process {
+                                number: n,
+                                args: vec![what.into(), n.to_string(), "--yes".into()],
+                                what: format!("writing the proposed {what}"),
+                            },
+                        }
+                    }
+                    None => Modal::Confirm {
+                        lines: vec![
+                            match kind {
+                                Kind::Estimate => format!("Estimate #{n} in story points?"),
+                                Kind::Refine => format!("Propose a clearer description of #{n}?"),
+                            },
+                            "A read-only session on Claude Code reads the item, what is under it and its documents.".into(),
+                            match kind {
+                                Kind::Estimate => "It answers a number of the board's scale, why, and what could change it.".into(),
+                                Kind::Refine => "It answers the new description, what changed, and the questions only a person can answer. What is asked does not change.".into(),
+                            },
+                            format!("Nothing is written: the proposal waits on the item's card, and `{c}` again writes it after you read it."),
+                        ],
+                        op: Op::Process {
+                            number: n,
+                            args: vec![what.into(), n.to_string()],
+                            what: format!("the {what}"),
+                        },
+                    },
+                });
+            }
             'f' => {
                 let Some(it) = target else {
                     return need("fix its pull request");
@@ -2238,6 +2357,80 @@ impl App {
         });
     }
 
+    /// Starts an interactive session on a work item: on Claude Code when a
+    /// profile runs it, else the first traced harness that has one, in the
+    /// hub's folder, with the `/project` skill installed and the item as
+    /// its opening message. The session is tagged with the item, so it is
+    /// part of the item's trace.
+    pub fn project_chat(&mut self, number: u64) -> Result<(), String> {
+        use crate::harness::Harness;
+        let Mode::Project(view) = &self.mode else {
+            return Err("no Project is open".into());
+        };
+        let snap = view.snap.as_ref().ok_or("the Project is not read yet")?;
+        let item = snap
+            .item(number)
+            .ok_or_else(|| format!("#{number} is not in the Project"))?;
+        let dir = view
+            .hub_root()
+            .or_else(|| view.cfg.as_ref().map(|c| c.root().to_path_buf()))
+            .ok_or("no .spec-wave.json here")?;
+        let harness = cli::HARNESSES
+            .into_iter()
+            .find(|h| {
+                self.profiles
+                    .iter()
+                    .any(|p| Harness::detect(&p.command) == Some(*h))
+            })
+            .ok_or("no profile runs a harness agent-mux traces")?;
+        let mut profile = self
+            .profiles
+            .iter()
+            .find(|p| Harness::detect(&p.command) == Some(harness))
+            .cloned()
+            .ok_or("no profile runs it")?;
+        let message = chat_opening(
+            &crate::skill::render::invocation(PROJECT_SKILL, harness),
+            item,
+            snap,
+        );
+        let tag = crate::project::ProjectLaunch {
+            hub: snap.hub.clone(),
+            item: number,
+            item_type: item.item_type.map(|t| t.as_str().to_string()),
+            feature: snap
+                .ancestor(number, ItemType::Feature)
+                .map(|f| f.number)
+                .filter(|f| *f != number),
+            milestone: item.milestone.clone(),
+            step: "chat".into(),
+            attempt: 1,
+            role: "chat".into(),
+            executor: "operator".into(),
+            ..Default::default()
+        };
+        let def = self
+            .find_skill(PROJECT_SKILL)
+            .ok_or("the project skill is not available")?;
+        crate::skill::install::install(def, harness, &self.skill_home(), false)
+            .map_err(|e| format!("installing the project skill for {}: {e}", harness.as_str()))?;
+        let opening = harness.opening_args(message);
+        profile.args.extend(opening.iter().cloned());
+        self.launch_project = Some(tag);
+        let started = self.finish_dialog_launch(super::DialogLaunch {
+            profile,
+            dir,
+            opening_args: opening,
+            continued_from: Some(format!("work item #{number}")),
+            agent: None,
+            link: None,
+            attach: None,
+            env: Vec::new(),
+        });
+        self.launch_project = None;
+        started
+    }
+
     /// Reads the item's sessions from the trace store: a local read, made
     /// on the spot each time the Trace tab opens.
     fn project_load_trace(&mut self, number: u64) {
@@ -2316,6 +2509,7 @@ impl App {
             view.checks = Some(checks);
             view.rebuild();
         }
+        view.reload_proposals(false);
         if let Some(rx) = &view.thread_rx
             && let Ok(thread) = rx.try_recv()
         {
@@ -2477,6 +2671,11 @@ impl App {
             Outcome::OpenDoc(path) => self.open_markdown(&path),
             Outcome::LoadThread(n) => self.project_load_thread(n),
             Outcome::LoadTrace(n) => self.project_load_trace(n),
+            Outcome::Chat(n) => {
+                if let Err(e) = self.project_chat(n) {
+                    self.notice = Some(Notice::error(format!("project: {e}")));
+                }
+            }
             Outcome::OpenRun(run) => {
                 let view = match std::mem::replace(&mut self.mode, Mode::Main) {
                     Mode::Project(v) => v,
@@ -2683,11 +2882,106 @@ mod tests {
             v.handle_key(&key(KeyCode::Enter)),
             Outcome::OpenRun("run-b".into())
         );
+        // a chat is asked of the App, on the open item
+        assert_eq!(v.handle_key(&key(KeyCode::Char('c'))), Outcome::Chat(3));
         v.handle_key(&key(KeyCode::Esc));
         assert_eq!(v.item.as_ref().unwrap().number, 1);
         v.handle_key(&key(KeyCode::Esc));
         assert!(v.item.is_none());
         assert_eq!(v.handle_key(&key(KeyCode::Esc)), Outcome::Close);
+    }
+
+    #[test]
+    fn an_estimate_is_asked_for_then_written_only_after_it_was_read() {
+        use crate::project::assist::{self, Kind, Proposal};
+        let scratch = tempfile::tempdir().unwrap();
+        let mut v = view();
+        v.scratch = scratch.path().to_path_buf();
+        v.item = Some(ItemScreen {
+            number: 2,
+            tab: 0,
+            cursor: 0,
+            scroll: 0,
+            back: vec![],
+        });
+        // nothing waits: the key asks for a proposal, and says nothing is written
+        assert_eq!(v.handle_key(&key(KeyCode::Char('E'))), Outcome::None);
+        let Some(Modal::Confirm { lines, op }) = &v.modal else {
+            panic!("no confirmation: {:?}", v.modal)
+        };
+        assert!(lines[0].contains("Estimate #2"), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("Nothing is written")),
+            "{lines:?}"
+        );
+        assert_eq!(
+            op,
+            &Op::Process {
+                number: 2,
+                args: vec!["estimate".into(), "2".into()],
+                what: "the estimate".into(),
+            }
+        );
+        v.modal = None;
+
+        // a proposal waits: it is on the card, and the key writes that one
+        let p = Proposal {
+            kind: Kind::Estimate,
+            hub: "acme/hub".into(),
+            number: 2,
+            title: "[STORY] ver pedidos".into(),
+            created_ns: 0,
+            harness: "claude".into(),
+            body: None,
+            base_hash: None,
+            changes: vec![],
+            questions: vec![],
+            points: Some("5".into()),
+            answered: Some(5.0),
+            rationale: "duas telas".into(),
+            risks: vec![],
+        };
+        assist::save(scratch.path(), &p).unwrap();
+        v.reload_proposals(true);
+        assert_eq!(v.proposals, vec![p]);
+        v.handle_key(&key(KeyCode::Char('E')));
+        let Some(Modal::Confirm { lines, op }) = &v.modal else {
+            panic!("no confirmation: {:?}", v.modal)
+        };
+        assert!(
+            lines[0].contains("Write the proposed estimate of #2"),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("5 story point(s)")),
+            "{lines:?}"
+        );
+        assert_eq!(
+            op,
+            &Op::Process {
+                number: 2,
+                args: vec!["estimate".into(), "2".into(), "--yes".into()],
+                what: "writing the proposed estimate".into(),
+            }
+        );
+        v.modal = None;
+        // a refine is its own proposal: none waits for it
+        v.handle_key(&key(KeyCode::Char('W')));
+        let Some(Modal::Confirm { lines, op }) = &v.modal else {
+            panic!("no confirmation: {:?}", v.modal)
+        };
+        assert!(lines[0].contains("clearer description of #2"), "{lines:?}");
+        assert!(matches!(op, Op::Process { args, .. } if args == &["refine", "2"]));
+
+        // the chat's opening message names the skill and the item
+        let snap = v.snap.as_ref().unwrap();
+        let text = chat_opening("/project", snap.item(2).unwrap(), snap);
+        assert!(text.starts_with("/project #2\n\n"), "{text}");
+        assert!(text.contains("work item #2 of acme/hub"), "{text}");
+        assert!(
+            text.contains("Run nothing that writes before I say yes"),
+            "{text}"
+        );
     }
 
     #[test]

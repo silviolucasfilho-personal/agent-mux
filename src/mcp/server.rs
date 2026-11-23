@@ -103,6 +103,24 @@ pub fn tool_catalog() -> Vec<ToolSpec> {
             read_only: true,
         },
         ToolSpec {
+            name: "agent_mux_project_list",
+            description: "The work items of a Project (a spec-wave repository) as agent-mux last read them from GitHub: number, type, title, stage, priority, milestone, parent, pull requests and each one's next step. Open items by default; type, stage and milestone narrow it. Answered from the cache: `agent-mux project sync` reads GitHub again. CLI: agent-mux project ls.",
+            input_schema: schema_of::<ProjectListArgs>(),
+            read_only: true,
+        },
+        ToolSpec {
+            name: "agent_mux_project_item",
+            description: "One work item of a Project from the cache: its card (type, stage, labels, parent and children, dependencies, documents with their state, pull requests) and its next step with what blocks it. item is the issue number. CLI: agent-mux project show <n>.",
+            input_schema: schema_of::<ProjectItemArgs>(),
+            read_only: true,
+        },
+        ToolSpec {
+            name: "agent_mux_project_next",
+            description: "The next step of a work item of a Project and why: the action (generate-spec, generate-plan, critique, validate, decompose, implement…), whether it can run now, and when it cannot, the block's code, message and how to unblock. Runs nothing. CLI: agent-mux project next <n>.",
+            input_schema: schema_of::<ProjectItemArgs>(),
+            read_only: true,
+        },
+        ToolSpec {
             name: "agent_mux_list_peers",
             description: "List active peer CLI sessions in the workspace (Claude Code, Codex, Antigravity) with their launch_id, runtime state, current goal, active tools, claimed tasks, file leases and unread messages.",
             input_schema: schema_of::<BusListPeersArgs>(),
@@ -180,6 +198,177 @@ pub struct ProjectItemArgs {
     /// session's workspace).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+}
+
+/// Arguments of `agent_mux_project_list`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectListArgs {
+    /// Only this type: Initiative, Epic, Feature, Story, Task, Bug, RFC.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub item_type: Option<String>,
+    /// Only this stage, by name (`ready`, `code review`, `desenvolvimento`…).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milestone: Option<String>,
+    /// Closed items too.
+    #[serde(default)]
+    pub all: bool,
+    /// The hub as `owner/repo`; absent means the workspace's Project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+}
+
+/// The cached snapshot of the Project a call is about, with the workspace.
+fn project_snapshot(
+    service: &TraceService,
+    hub: Option<&str>,
+    workspace: Option<&str>,
+) -> Result<(PathBuf, crate::project::Snapshot), Value> {
+    let ws = bus_workspace(service, workspace);
+    let hub = match hub.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(h) => h.to_string(),
+        None => match crate::project::config::load(&ws) {
+            Ok(c) => c.hub_repo().slug(),
+            Err(e) => {
+                return Err(tool_error(&ServiceError::InvalidArgument(format!(
+                    "{e}; name the hub with hub = \"owner/repo\""
+                ))));
+            }
+        },
+    };
+    let conn = crate::tracing::store::open_ro(&service.config().db_path)
+        .map_err(|e| tool_error(&ServiceError::DbUnavailable(e)))?;
+    // the hub as the cache spells it, whatever the caller's case
+    let hub = crate::project::store::hubs(&conn)
+        .into_iter()
+        .find(|h| h.eq_ignore_ascii_case(&hub))
+        .unwrap_or(hub);
+    match crate::project::store::load(&conn, &hub) {
+        Ok(Some(snap)) => Ok((ws, snap)),
+        Ok(None) => Err(tool_error(&ServiceError::NotFound(format!(
+            "the Project {hub} was never read on this machine: run `agent-mux project sync` in its folder"
+        )))),
+        Err(e) => Err(tool_error(&ServiceError::DbUnavailable(e))),
+    }
+}
+
+/// `agent_mux_project_list`: the cached items, narrowed.
+fn project_list_result(service: &TraceService, arguments: Value) -> Value {
+    use crate::project::{ItemType, cli, stage};
+    let args: ProjectListArgs = match serde_json::from_value(arguments) {
+        Ok(a) => a,
+        Err(e) => {
+            return tool_error(&ServiceError::InvalidArgument(format!(
+                "invalid arguments for project_list: {e}"
+            )));
+        }
+    };
+    let want_type = match args.item_type.as_deref() {
+        Some(t) => match ItemType::parse(t) {
+            Some(t) => Some(t),
+            None => {
+                return tool_error(&ServiceError::InvalidArgument(format!(
+                    "\"{t}\" is not a work item type"
+                )));
+            }
+        },
+        None => None,
+    };
+    let want_stage = match args.stage.as_deref() {
+        Some(st) => match stage::resolve(st) {
+            Ok(s) => Some(s),
+            Err(e) => return tool_error(&ServiceError::InvalidArgument(e)),
+        },
+        None => None,
+    };
+    let (ws, snap) = match project_snapshot(service, args.hub.as_deref(), args.workspace.as_deref())
+    {
+        Ok(v) => v,
+        Err(v) => return v,
+    };
+    let items: Vec<Value> = snap
+        .items
+        .iter()
+        .filter(|i| args.all || i.open)
+        .filter(|i| want_type.is_none_or(|t| i.item_type == Some(t)))
+        .filter(|i| want_stage.is_none_or(|st| stage::shown(i).stage == st))
+        .filter(|i| {
+            args.milestone
+                .as_deref()
+                .is_none_or(|m| i.milestone.as_deref() == Some(m))
+        })
+        .map(|i| {
+            let shown = stage::shown(i);
+            json!({
+                "number": i.number,
+                "type": i.item_type.map(ItemType::as_str),
+                "title": i.name(),
+                "open": i.open,
+                "stage": shown.stage,
+                "stage_derived": shown.derived,
+                "priority": i.priority,
+                "milestone": i.milestone,
+                "parent": i.parent,
+                "pulls": i.pulls.iter().map(|p| json!({
+                    "repo": p.repo, "number": p.number, "state": p.state, "draft": p.draft
+                })).collect::<Vec<_>>(),
+                "next": cli::decision_json(&crate::project::next::describe(i, &snap)),
+            })
+        })
+        .collect();
+    bus_ok_envelope(
+        &ws,
+        json!({
+            "hub": snap.hub,
+            "synced_ns": snap.synced_ns,
+            "count": items.len(),
+            "items": items,
+        }),
+    )
+}
+
+/// `agent_mux_project_item` and `agent_mux_project_next`: one cached item.
+fn project_card_result(service: &TraceService, arguments: Value, next_only: bool) -> Value {
+    use crate::project::cli;
+    let args: ProjectItemArgs = match serde_json::from_value(arguments) {
+        Ok(a) => a,
+        Err(e) => {
+            return tool_error(&ServiceError::InvalidArgument(format!(
+                "invalid arguments for project_item: {e}"
+            )));
+        }
+    };
+    let (ws, snap) = match project_snapshot(service, args.hub.as_deref(), args.workspace.as_deref())
+    {
+        Ok(v) => v,
+        Err(v) => return v,
+    };
+    let Some(item) = snap.item(args.item) else {
+        return tool_error(&ServiceError::NotFound(format!(
+            "issue #{} is not in the Project {} (closed long ago, or not read yet)",
+            args.item, snap.hub
+        )));
+    };
+    let data = if next_only {
+        let mut v = cli::decision_json(&crate::project::next::describe(item, &snap));
+        v["item"] = json!(item.number);
+        v["title"] = json!(item.name());
+        v["lines"] = json!(cli::decision_lines(&crate::project::next::describe(
+            item, &snap
+        )));
+        v
+    } else {
+        let mut v = cli::item_json(item, &snap);
+        v["hub"] = json!(snap.hub);
+        v["synced_ns"] = json!(snap.synced_ns);
+        v["card"] = json!(cli::card_lines(item, &snap));
+        v
+    };
+    bus_ok_envelope(&ws, data)
 }
 
 /// `agent_mux_get_project_item`: the item's report
@@ -1472,6 +1661,21 @@ pub fn handle_message(service: &TraceService, line: &str) -> Option<Value> {
                 "agent_mux_get_project_item" => {
                     return Some(rpc_result(id, project_item_result(service, arguments)));
                 }
+                "agent_mux_project_list" => {
+                    return Some(rpc_result(id, project_list_result(service, arguments)));
+                }
+                "agent_mux_project_item" => {
+                    return Some(rpc_result(
+                        id,
+                        project_card_result(service, arguments, false),
+                    ));
+                }
+                "agent_mux_project_next" => {
+                    return Some(rpc_result(
+                        id,
+                        project_card_result(service, arguments, true),
+                    ));
+                }
                 "agent_mux_list_peers" => {
                     return Some(rpc_result(id, bus_list_peers_result(service, arguments)));
                 }
@@ -1688,7 +1892,14 @@ mod tests {
     #[test]
     fn catalog_contains_trace_and_bus_tools() {
         let names = tool_names();
-        assert_eq!(names.len(), 25);
+        assert_eq!(names.len(), 28);
+        for name in [
+            "agent_mux_project_list",
+            "agent_mux_project_item",
+            "agent_mux_project_next",
+        ] {
+            assert!(names.contains(&name), "{name}");
+        }
         assert!(names.contains(&"agent_mux_get_project_item"));
         assert!(names.contains(&"agent_mux_swarm_plan"));
         assert!(names.contains(&"agent_mux_get_swarm"));
@@ -1715,7 +1926,7 @@ mod tests {
         );
         let list = tools_list_value();
         let tools = list["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 25);
+        assert_eq!(tools.len(), 28);
         for t in tools {
             assert_eq!(t["annotations"]["destructiveHint"], false);
             assert_eq!(t["inputSchema"]["type"], "object");
@@ -1773,6 +1984,95 @@ mod tests {
         assert_eq!(lost["isError"], true, "{lost}");
         let text = lost.to_string();
         assert!(text.contains("owner/repo"), "{text}");
+    }
+
+    #[test]
+    fn a_projects_items_are_answered_from_its_cache() {
+        use crate::project::snapshot::{self, tests as fixture};
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("traces.db");
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let service = TraceService::new(ServiceConfig::new(
+            db.clone(),
+            Scope::workspace(&ws).unwrap(),
+        ))
+        .unwrap();
+        let call = |name: &str, args: Value| -> Value {
+            let req = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                             "params": {"name": name, "arguments": args}});
+            handle_message(&service, &req.to_string()).unwrap()["result"].clone()
+        };
+        // a Project that was never read says how to read it
+        let _ = crate::tracing::store::open_rw(&db, crate::tracing::store::OpenOptions::default())
+            .unwrap();
+        let none = call("agent_mux_project_list", json!({"hub": "acme/hub"}));
+        assert_eq!(none["isError"], true, "{none}");
+        assert!(
+            none.to_string().contains("agent-mux project sync"),
+            "{none}"
+        );
+
+        let snap = snapshot::build(&fixture::raw(), &fixture::cfg(), 7);
+        let conn = crate::project::cli::open_store(&db).unwrap();
+        crate::project::store::save(&conn, &snap).unwrap();
+        drop(conn);
+
+        let all = call("agent_mux_project_list", json!({"hub": "Acme/Hub"}));
+        assert_eq!(all["isError"], false, "{all}");
+        let data = &all["structuredContent"]["data"];
+        assert_eq!(data["hub"], "acme/hub");
+        let open = snap.items.iter().filter(|i| i.open).count();
+        assert_eq!(data["count"], open);
+        assert!(data["items"][0]["next"]["action"].is_string(), "{data}");
+        // narrowed by type; an unknown type is an argument error, not an empty list
+        let stories = call(
+            "agent_mux_project_list",
+            json!({"hub": "acme/hub", "type": "story"}),
+        );
+        let list = stories["structuredContent"]["data"]["items"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(
+            !list.is_empty() && list.iter().all(|i| i["type"] == "Story"),
+            "{list:?}"
+        );
+        let bad = call(
+            "agent_mux_project_list",
+            json!({"hub": "acme/hub", "type": "saga"}),
+        );
+        assert_eq!(bad["isError"], true, "{bad}");
+
+        let number = list[0]["number"].as_u64().unwrap();
+        let item = call(
+            "agent_mux_project_item",
+            json!({"hub": "acme/hub", "item": number}),
+        );
+        assert_eq!(item["isError"], false, "{item}");
+        let data = &item["structuredContent"]["data"];
+        assert_eq!(data["number"], number);
+        assert!(
+            data["card"].as_array().is_some_and(|c| !c.is_empty()),
+            "{data}"
+        );
+        assert!(data["next"]["reason"].is_string());
+        let next = call(
+            "agent_mux_project_next",
+            json!({"hub": "acme/hub", "item": number}),
+        );
+        let data = &next["structuredContent"]["data"];
+        assert_eq!(data["item"], number);
+        assert!(
+            data["action"].is_string() && data["lines"].is_array(),
+            "{data}"
+        );
+        // an issue that is not in the cache
+        let lost = call(
+            "agent_mux_project_next",
+            json!({"hub": "acme/hub", "item": 9999}),
+        );
+        assert_eq!(lost["isError"], true, "{lost}");
     }
 
     #[test]

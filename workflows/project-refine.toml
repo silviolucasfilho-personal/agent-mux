@@ -1,0 +1,40 @@
+# A step of the Projects flow (docs/project.md): one read-only session.
+# The session writes nothing: it answers a clearer description of the work
+# item, which agent-mux shows and writes to the issue only on the
+# operator's yes.
+[workflow]
+name = "project-refine"
+description = "Rewrite a work item's description so it is clear and complete; answers the new description and what changed."
+when_to_use = "Started by `agent-mux project refine` and by `W` on an item of the Project screens."
+output = "work"
+default_isolation = "none"
+
+[args.kind]
+description = "The item's type: Feature, Story, Bug, Task…"
+required = true
+[args.title]
+description = "The issue's title."
+required = true
+[args.body]
+description = "The issue's description, as it is."
+required = true
+[args.parent]
+description = "The item above it: its title and description."
+default = ""
+[args.comments]
+description = "What people commented on the issue."
+default = ""
+
+[schemas.refined]
+fields.body = { type = "string", required = true }
+fields.changes = { type = "array", items = "string", required = true }
+fields.questions = { type = "array", items = "string" }
+
+[[steps]]
+id = "work"
+phase = "Work"
+agent = "spec-writer"
+skill = "wf-project-refine"
+isolation = "none"
+args = { kind = "{args.kind}", title = "{args.title}", body = "{args.body}", parent = "{args.parent}", comments = "{args.comments}" }
+result = "refined"

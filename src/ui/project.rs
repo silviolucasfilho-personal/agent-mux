@@ -679,7 +679,25 @@ fn draw_item_screen(f: &mut Frame, area: Rect, v: &ProjectView) {
     let mut wrap_text = false;
     let mut scroll = screen.scroll;
     let lines: Vec<Line> = match screen.tab {
-        0 => cli::card_lines(it, s).into_iter().map(styled).collect(),
+        0 => {
+            let mut lines: Vec<Line> = cli::card_lines(it, s).into_iter().map(styled).collect();
+            // what a refine or an estimate proposed, waiting for a yes
+            for p in v.proposals.iter().filter(|p| p.number == it.number) {
+                let key = match p.kind {
+                    crate::project::assist::Kind::Estimate => "E",
+                    crate::project::assist::Kind::Refine => "W",
+                };
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(
+                    format!(" a proposal waits · [{key}] writes it after you read it"),
+                    Style::default().fg(Color::Yellow),
+                ));
+                for l in crate::project::assist::lines(p, true) {
+                    lines.push(Line::raw(format!("   {l}")));
+                }
+            }
+            lines
+        }
         1 => {
             scroll = 0;
             list_tab(
@@ -1018,6 +1036,9 @@ fn draw_foot(f: &mut Frame, area: Rect, v: &ProjectView) {
         }
         pairs.extend([
             ("m", "move"),
+            ("c", "chat"),
+            ("E", "estimate"),
+            ("W", "refine"),
             ("o", "issue in browser"),
             ("Ctrl+R", "reload"),
             ("Esc", "back"),
@@ -1148,6 +1169,45 @@ mod tests {
         assert!(text.contains("acme/api#12  open (draft)"), "{text}");
         v.item.as_mut().unwrap().tab = 4;
         assert!(screen_text(&v, 150, 30).contains("reading the issue's thread"));
+    }
+
+    #[test]
+    fn a_waiting_proposal_is_on_the_items_card_with_the_key_that_writes_it() {
+        use crate::project::assist::{Kind, Proposal};
+        let mut v = view();
+        v.item = Some(crate::app::project::ItemScreen {
+            number: 2,
+            tab: 0,
+            cursor: 0,
+            scroll: 0,
+            back: vec![],
+        });
+        let text = screen_text(&v, 150, 40);
+        assert!(!text.contains("a proposal waits"), "{text}");
+        assert!(text.contains("estimate") && text.contains("refine") && text.contains("chat"));
+        v.proposals = vec![Proposal {
+            kind: Kind::Refine,
+            hub: "acme/hub".into(),
+            number: 2,
+            title: "[STORY] ver pedidos".into(),
+            created_ns: 0,
+            harness: "claude".into(),
+            body: Some("## Objetivo\nVer os pedidos do mês".into()),
+            base_hash: Some("h".into()),
+            changes: vec!["organizado em seções".into()],
+            questions: vec![],
+            points: None,
+            answered: None,
+            rationale: String::new(),
+            risks: vec![],
+        }];
+        let text = screen_text(&v, 150, 40);
+        assert!(text.contains("a proposal waits · [W] writes it"), "{text}");
+        assert!(text.contains("change: organizado em seções"), "{text}");
+        assert!(text.contains("Ver os pedidos do mês"), "{text}");
+        // a proposal of another item is not shown here
+        v.proposals[0].number = 3;
+        assert!(!screen_text(&v, 150, 40).contains("a proposal waits"));
     }
 
     #[test]
