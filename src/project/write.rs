@@ -194,6 +194,30 @@ pub fn remove_label(
     issue_edit(tools, cfg, number, "--remove-label", label)
 }
 
+/// Replaces an issue's description with the text of `file`.
+pub fn set_body(
+    tools: &Tools,
+    cfg: &ProjectConfig,
+    number: u64,
+    file: &std::path::Path,
+) -> Result<(), String> {
+    gh(
+        tools,
+        cfg.root(),
+        &[
+            "issue",
+            "edit",
+            &number.to_string(),
+            "-R",
+            &cfg.hub_repo().slug(),
+            "--body-file",
+            &file.to_string_lossy(),
+        ],
+        "gh issue edit",
+    )
+    .map(|_| ())
+}
+
 pub fn comment(tools: &Tools, cfg: &ProjectConfig, number: u64, body: &str) -> Result<(), String> {
     gh(
         tools,

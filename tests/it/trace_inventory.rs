@@ -250,18 +250,22 @@ fn the_skills_view_lists_native_skills_with_their_turns_and_statistics() {
         vec![
             "# claude",
             "heimdall@claude",
+            "project@claude",
             "swarm-coordinator@claude",
             "native deploy",
             "native silent",
             "# codex",
             "heimdall@codex",
+            "project@codex",
             "swarm-coordinator@codex",
             "# agy",
             "heimdall@agy",
+            "project@agy",
             "swarm-coordinator@agy",
             // opencode reads the project's .claude/skills too
             "# opencode",
             "heimdall@opencode",
+            "project@opencode",
             "swarm-coordinator@opencode",
             "native deploy",
             "native silent",
@@ -271,17 +275,20 @@ fn the_skills_view_lists_native_skills_with_their_turns_and_statistics() {
             "heimdall@pi",
             "# muse",
             "heimdall@muse",
+            "project@muse",
             "swarm-coordinator@muse",
             "native deploy",
             "native silent",
             "# cursor",
             "heimdall@cursor",
+            "project@cursor",
             "swarm-coordinator@cursor",
         ]
     );
     assert_eq!(view.selected, 1, "the first selectable row, never a header");
 
     // j reaches the native rows; the store knows deploy's turn and misses
+    view.step(1);
     view.step(1);
     view.step(1);
     assert_eq!(
@@ -335,18 +342,22 @@ fn the_skills_view_lists_native_skills_with_their_turns_and_statistics() {
 
     // a harness filter keeps only that group; the same key clears it
     view.toggle_filter(Harness::Codex);
-    assert_eq!(view.rows.len(), 3, "the header, heimdall, the coordinator");
+    assert_eq!(
+        view.rows.len(),
+        4,
+        "the header, heimdall, project, the coordinator"
+    );
     assert_eq!(
         view.selected_package().map(|(p, h)| (p.id.as_str(), h)),
         Some(("heimdall", Harness::Codex))
     );
     assert!(view.clear_filter());
-    assert_eq!(view.rows.len(), 28);
+    assert_eq!(view.rows.len(), 34);
     assert!(!view.clear_filter());
 
     // without a store the view still lists what is on disk
     let bare = SkillsViewState::new(None, &cwd, &home, &home, Some(&skills_dir));
-    assert_eq!(bare.rows.len(), 28);
+    assert_eq!(bare.rows.len(), 34);
     assert!(bare.turns.is_empty());
     assert!(bare.error.as_deref().unwrap().contains("tracing is off"));
 }

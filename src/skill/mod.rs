@@ -120,6 +120,13 @@ pub fn builtin_packages() -> Vec<BuiltinPackage> {
                 include_str!("../../skills/swarm-coordinator/reference/plan.md"),
             )],
         },
+        BuiltinPackage {
+            id: "project",
+            repo_dir: "skills/project/",
+            skill_md: include_str!("../../skills/project/SKILL.md"),
+            skill_toml: Some(include_str!("../../skills/project/skill.toml")),
+            files: &[],
+        },
         wf_skill!("wf-review-find"),
         wf_skill!("wf-refute"),
         wf_skill!("wf-synthesize"),
@@ -152,6 +159,8 @@ pub fn builtin_packages() -> Vec<BuiltinPackage> {
         wf_skill!("wf-project-decompose"),
         wf_skill!("wf-project-build"),
         wf_skill!("wf-project-review"),
+        wf_skill!("wf-project-estimate"),
+        wf_skill!("wf-project-refine"),
     ]
 }
 

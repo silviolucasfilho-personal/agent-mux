@@ -1,0 +1,42 @@
+# A step of the Projects flow (docs/project.md): one read-only session.
+# The session writes nothing: it answers an estimate, which agent-mux shows
+# and writes to the board's `Story Points` field only on the operator's yes.
+[workflow]
+name = "project-estimate"
+description = "Estimate a work item's effort in story points; answers the points, why, and what could change them."
+when_to_use = "Started by `agent-mux project estimate` and by `E` on an item of the Project screens."
+output = "work"
+default_isolation = "none"
+
+[args.kind]
+description = "The item's type: Feature, Story, Bug, Task…"
+required = true
+[args.issue]
+description = "The issue: its title and description."
+required = true
+[args.scale]
+description = "The values an estimate may take, smallest first."
+required = true
+[args.children]
+description = "The items under it (a Feature's Stories, a Story's Tasks), one per line."
+default = ""
+[args.spec]
+description = "The Feature's spec.md, when it is merged."
+default = ""
+[args.plan]
+description = "The Feature's plan.md, when it is merged."
+default = ""
+
+[schemas.estimate]
+fields.points = { type = "number", required = true }
+fields.rationale = { type = "string", required = true }
+fields.risks = { type = "array", items = "string" }
+
+[[steps]]
+id = "work"
+phase = "Work"
+agent = "tech-lead"
+skill = "wf-project-estimate"
+isolation = "none"
+args = { kind = "{args.kind}", issue = "{args.issue}", scale = "{args.scale}", children = "{args.children}", spec = "{args.spec}", plan = "{args.plan}" }
+result = "estimate"

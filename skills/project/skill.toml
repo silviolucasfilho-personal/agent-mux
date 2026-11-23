@@ -1,0 +1,13 @@
+# agent-mux metadata for the Project skill. SKILL.md is harness-neutral;
+# this file says how agent-mux lists and launches it. It is the skill of an
+# interactive session on a work item of a Project (a repository configured
+# with spec-wave): `c` on an item of the Project screens starts one, and
+# any session may invoke it by hand. Only the harnesses agent-mux traces.
+name = "Project"
+icon = "▤"
+harnesses = ["claude", "codex", "agy", "opencode", "muse", "cursor"]
+capabilities = ["trace.read"]
+startup_prompt = "Show me where this Project stands and what waits on me."
+
+[agent]
+mcp = "auto"

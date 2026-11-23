@@ -44,6 +44,10 @@ const PLAN_JSON: &str = r##"{"document":"# Estratégia Técnica\n# Detalhamento 
 const FINDINGS_JSON: &str =
     r#"{"findings":[{"severity":"menor","anchor":"Backend","text":"ordem das seções"}]}"#;
 
+const ESTIMATE_JSON: &str =
+    r#"{"points":6,"rationale":"duas telas e uma migração","risks":["API de pagamentos"]}"#;
+const REFINED_JSON: &str = r###"{"body":"## Objetivo\nVer os pedidos do mês\n\n## Critérios de aceite\n- lista paginada\n\nDepende de: #9","changes":["organizado em seções"],"questions":["qual o tamanho da página?"]}"###;
+
 const WORK_JSON: &str = r#"{"base":"origin/main","change_summary":[{"path":"pedidos.rs","change":"lista os pedidos"}],"verification":[{"command":"cargo test","result":"pass"}],"deviations":[],"known_limitations":[]}"#;
 const APPROVE_JSON: &str = r#"{"verdict":"approve","criteria_results":[{"criterion":"lista paginada","pass":true,"evidence":"pedidos.rs:1"}],"blocking_findings":[],"suggestions":[],"summary":"faz o que a Story pede"}"#;
 
@@ -84,6 +88,10 @@ case "$AGENT_MUX_WORKFLOW_STEP" in
 esac
 if grep -q '"findings"' "$AGENT_MUX_WORKFLOW_CONTEXT"; then
   emit '{findings}'
+elif grep -q '"rationale"' "$AGENT_MUX_WORKFLOW_CONTEXT"; then
+  emit '{estimate}'
+elif grep -q '"questions"' "$AGENT_MUX_WORKFLOW_CONTEXT"; then
+  emit '{refined}'
 else
   emit '{plan}'
 fi
@@ -91,6 +99,8 @@ exit 0
 "#,
         record = record.display(),
         findings = FINDINGS_JSON,
+        estimate = ESTIMATE_JSON,
+        refined = REFINED_JSON,
         plan = PLAN_JSON,
         work = WORK_JSON,
         approve = APPROVE_JSON,
@@ -713,6 +723,91 @@ fn the_build_flows_review_in_a_worktree() {
         assert!(
             text.contains("harness = \"other\""),
             "{flow}: the review is independent"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_estimate_and_a_refine_are_proposed_and_nothing_is_written() {
+    use agent_mux::project::assist::{self, Kind as Assist};
+    let mut f = fixture();
+    let cfg = agent_mux::project::config::load(&f.hub).unwrap();
+    let mut story = feature();
+    story.number = 12;
+    story.title = "[STORY] Ver pedidos".into();
+    story.item_type = Some(ItemType::Story);
+    story.docs.clear();
+    let snap = agent_mux::project::Snapshot {
+        hub: "acme/hub".into(),
+        items: vec![story.clone()],
+        ..Default::default()
+    };
+    let detail = Detail {
+        title: story.title.clone(),
+        body: "Quero ver meus pedidos\n\nDepende de: #9".into(),
+        url: "https://github.com/acme/hub/issues/12".into(),
+        comments: vec![],
+    };
+    let (estimate_args, refine_args) = {
+        let ctx = Ctx {
+            tools: &f.tools,
+            cfg: &cfg,
+            hub_root: f.hub.clone(),
+            scratch: f.root.join("scratch"),
+        };
+        (
+            ctx.estimate_args(&story, &detail, &snap),
+            ctx.refine_args(&story, &detail, &snap).unwrap(),
+        )
+    };
+    // the Project's file names no Story Points field: Fibonacci
+    assert_eq!(estimate_args["scale"], "1, 2, 3, 5, 8, 13, 21");
+    assert_eq!(estimate_args["kind"], "Story");
+
+    let result = run_flow(&mut f, assist::FLOW_ESTIMATE, estimate_args).await;
+    let p = assist::estimate_of(
+        &story,
+        "acme/hub",
+        &result,
+        &assist::scale(&cfg),
+        "claude",
+        1,
+    )
+    .unwrap();
+    // the session answered 6, which the scale does not have
+    assert_eq!(p.points.as_deref(), Some("5"));
+    assert_eq!(p.risks, vec!["API de pagamentos"]);
+    assist::save(&f.root.join("scratch"), &p).unwrap();
+
+    let result = run_flow(&mut f, assist::FLOW_REFINE, refine_args).await;
+    let p = assist::refined_of(&story, "acme/hub", &detail, &result, "claude", 2).unwrap();
+    assert!(
+        p.body.as_deref().unwrap().starts_with("## Objetivo"),
+        "{p:?}"
+    );
+    assert_eq!(p.questions, vec!["qual o tamanho da página?"]);
+    assist::save(&f.root.join("scratch"), &p).unwrap();
+
+    // both wait in files, and neither session nor agent-mux touched GitHub or the checkout
+    let waiting = assist::waiting(&f.root.join("scratch"), "acme/hub", 12);
+    assert_eq!(
+        waiting.iter().map(|p| p.kind).collect::<Vec<_>>(),
+        vec![Assist::Refine, Assist::Estimate]
+    );
+    assert!(
+        std::fs::read_to_string(f.root.join("gh-calls")).is_err(),
+        "a proposal wrote to GitHub"
+    );
+    assert_eq!(
+        git(&f.hub, &["status", "--porcelain", "--untracked-files=no"]),
+        ""
+    );
+    for flow in [assist::FLOW_ESTIMATE, assist::FLOW_REFINE] {
+        assert!(
+            library::builtin(flow)
+                .unwrap()
+                .contains("isolation = \"none\""),
+            "{flow} must not write"
         );
     }
 }

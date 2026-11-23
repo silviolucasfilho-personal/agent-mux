@@ -9,7 +9,7 @@
 //! (`src/pi_mcp_extension.js`) is therefore a one-server MCP client: it
 //! starts the server named in `AGENT_MUX_PI_MCP`, lists its tools and
 //! registers each one under its own name. Probed: `pi --mode rpc -e <it>`
-//! lists the 25 `agent_mux_*` tools among the active tools, and a call
+//! lists the 28 `agent_mux_*` tools among the active tools, and a call
 //! returns the server's result.
 //!
 //! The extension file lives under `~/.agent-mux/pi-extension/`, agent-mux's
