@@ -188,6 +188,7 @@ fn draw_list(f: &mut Frame, area: Rect, v: &ProjectView) {
         lines.push(Line::styled(
             match v.screen {
                 Screen::Health if v.checks.is_none() => " running the checks…",
+                Screen::Observability => " the numbers are on the right →",
                 Screen::Milestones => " no open milestone",
                 _ => " nothing here",
             },
@@ -546,6 +547,26 @@ fn draw_pane(f: &mut Frame, area: Rect, v: &ProjectView) {
     };
     let mut wrap_text = false;
     let (title, lines): (String, Vec<Line>) = match (v.screen, v.selected_row()) {
+        (Screen::Observability, _) => {
+            let which = &v.activity[tab.min(1)];
+            let lines = if which.is_empty() {
+                vec![Line::styled(" reading the trace store…", dim())]
+            } else {
+                which
+                    .iter()
+                    .enumerate()
+                    .map(|(i, l)| {
+                        // the totals, and each section's title
+                        if i == 0 || (!l.starts_with(' ') && !l.is_empty()) {
+                            Line::styled(format!(" {l}"), head())
+                        } else {
+                            Line::raw(format!(" {l}"))
+                        }
+                    })
+                    .collect()
+            };
+            (" what the steps cost ".into(), lines)
+        }
         (Screen::Health, Some(Row::Check(at))) => {
             wrap_text = true;
             match v.checks.as_ref().and_then(|c| c.get(*at)) {
@@ -596,6 +617,7 @@ fn draw_pane(f: &mut Frame, area: Rect, v: &ProjectView) {
         (_, Some(Row::Item { number, .. })) => match s.item(*number) {
             Some(it) => {
                 let mut lines: Vec<Line> = cli::card_lines(it, s).into_iter().map(styled).collect();
+                lines.extend(sessions_line(v, it.number));
                 if let Some(d) = v.dispatches.iter().find(|d| d.item == it.number) {
                     lines.push(Line::raw(""));
                     lines.push(Line::styled(
@@ -702,6 +724,7 @@ fn draw_item_screen(f: &mut Frame, area: Rect, v: &ProjectView) {
     let lines: Vec<Line> = match screen.tab {
         0 => {
             let mut lines: Vec<Line> = cli::card_lines(it, s).into_iter().map(styled).collect();
+            lines.extend(sessions_line(v, it.number));
             // what a refine or an estimate proposed, waiting for a yes
             for p in v.proposals.iter().filter(|p| p.number == it.number) {
                 let key = match p.kind {
@@ -838,6 +861,16 @@ fn draw_item_screen(f: &mut Frame, area: Rect, v: &ProjectView) {
             focused: true,
         },
     );
+}
+
+/// What an item's sessions add up to, as the card's last line; nothing
+/// when no step ran a session for it or for what is under it.
+fn sessions_line(v: &ProjectView, number: u64) -> Option<Line<'static>> {
+    let text = v
+        .totals
+        .get(&number)
+        .and_then(crate::tracing::project_report::card_line)?;
+    Some(styled(text))
 }
 
 /// The Trace tab: the runs of the item's steps, and the sessions of the
@@ -1261,6 +1294,56 @@ mod tests {
         assert!(text.contains("running"), "{text}");
         assert!(text.contains("fleet · WIP: running for"), "{text}");
         assert!(text.contains("as ana@host"), "{text}");
+    }
+
+    #[test]
+    fn a_card_says_what_its_sessions_cost_and_observability_adds_them_up() {
+        use crate::tracing::project_report::{ItemTotals, Totals};
+        let mut v = view();
+        v.item = Some(crate::app::project::ItemScreen {
+            number: 2,
+            tab: 0,
+            cursor: 0,
+            scroll: 0,
+            back: vec![],
+        });
+        assert!(!screen_text(&v, 150, 40).contains("Sessions:"));
+        let own = Totals {
+            sessions: 2,
+            tokens: 12_400,
+            cost_usd: 0.42,
+            unpriced: false,
+            wall_ns: 18 * 60_000_000_000,
+            errors: 0,
+        };
+        v.totals.insert(2, ItemTotals { own, rolled: own });
+        let text = screen_text(&v, 150, 40);
+        assert!(text.contains("Sessions:  2 session(s)"), "{text}");
+        assert!(text.contains("18m"), "{text}");
+
+        // the screen has no rows: its pane is the numbers, in two windows
+        v.item = None;
+        v.screen = Screen::Observability;
+        v.rebuild();
+        assert!(v.rows.is_empty());
+        assert!(screen_text(&v, 150, 30).contains("reading the trace store"));
+        v.activity = [
+            vec![
+                "the last 30 days: 2 session(s) · 12.4k tok · $0.42 · 18m".into(),
+                String::new(),
+                "By step".into(),
+                "  build                        2 session(s)".into(),
+            ],
+            vec!["ever: 9 session(s)".into()],
+        ];
+        let text = screen_text(&v, 150, 30);
+        assert!(text.contains("Observability"), "{text}");
+        assert!(
+            text.contains("the last 30 days: 2 session(s)") && text.contains("By step"),
+            "{text}"
+        );
+        v.tab = 1;
+        assert!(screen_text(&v, 150, 30).contains("ever: 9 session(s)"));
     }
 
     #[test]

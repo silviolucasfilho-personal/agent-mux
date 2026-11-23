@@ -103,9 +103,33 @@ Heimdall briefs the user on active and recent sessions and evaluates skills and 
       "swarms": [ /* SwarmCard */ ],
       "total_swarms": 1
     }
+  },
+  "projects": {
+    "status": "full",
+    "warnings": [],
+    "errors": [],
+    "truncated": false,
+    "total_matching": 1,
+    "data": {
+      "projects": [ /* ProjectCard */ ],
+      "total_projects": 1
+    }
   }
 }
 ```
+
+The `projects` section (added with the Projects design, schema version
+unchanged: readers of version 2 ignore it) has one card when the workspace
+is a repository configured with spec-wave and its steps ran something in the
+sessions window, or the fleet holds one of its items; otherwise it is empty.
+A `ProjectCard` carries `hub`, `runs` and `sessions` (of the window), `going`
+(sessions not ended), `items` (issue numbers a step ran for), `steps` (runs
+per kind of step, most first), `tokens`, `cost_usd`, `unpriced`,
+`sessions_with_errors`, `fleet_wip`, `fleet_blocked`, `fleet_review` (the
+fleet's cards now) and `blocked` (one line per Blocked card with its
+reason). It is built from `launches.metadata.project`
+(`tracing::project_report`) and `project_dispatches`; nothing is read from
+GitHub. `health.projects_build_ms` times it.
 
 The `swarms` section (added with the coordinator-first swarm design, schema
 version unchanged: readers of version 2 ignore it) lists the workspace's

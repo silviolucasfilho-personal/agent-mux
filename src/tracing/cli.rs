@@ -1895,12 +1895,11 @@ fn project(args: &Args) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string(&report)?);
         return Ok(());
     }
-    if args.has("timeline") {
-        anyhow::bail!("a Project item has no timeline view yet: use --tree or --log");
-    }
     let now = now_ns();
     let lines = if args.has("log") {
         pr::log_lines(&report, now)
+    } else if args.has("timeline") {
+        pr::timeline_lines(&report, now, 60)
     } else {
         pr::tree_lines(&report, now)
     };

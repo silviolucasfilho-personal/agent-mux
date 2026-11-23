@@ -29,6 +29,7 @@ F1 → **Open project** opens the Project of the selected session's folder.
 | Bugs | Bugs to triage first, then each later stage of a Bug's track |
 | UAT and release | What is in acceptance (Homologação) and what waits for deploy |
 | Milestones | Each open milestone, its Features and the state of each one's documents |
+| Observability | What the Project's steps cost and what is running: totals, sessions going now, and the cost by step, harness, milestone, executor and item, for the last 30 days and ever |
 | Health | What `agent-mux project doctor` reports |
 
 The left column holds the screens and, under them, the selected screen's rows. The right pane shows the selected row.
@@ -316,11 +317,16 @@ Every session a step starts records the work item it runs for on its launch row 
 
 ```
 agent-mux trace project <n>            a tree: each step's run, and its sessions with turns, tools, tokens and cost
+agent-mux trace project <n> --timeline one row per session on a time axis, a bar where it ran
 agent-mux trace project <n> --log      one line per session, oldest first
 agent-mux trace project <n> --json
 ```
 
 A Feature is read with its Stories and their Tasks. The hub is the one of the folder's `.spec-wave.json`; `--hub owner/repo` names another. Steps run before sessions carried this record are not listed.
+
+**On the cards.** An item's card, on the screens and in `agent-mux project show <n>`, ends with what its steps' sessions add up to: how many, their tokens, cost and running time. A Feature's line also gives the total with what is under it. The numbers come from the trace store, never from GitHub.
+
+**Heimdall.** In a spec-wave repository, Heimdall's briefing has a `projects` section: what the Project's steps ran in the last day (runs per kind of step, sessions, items, tokens, cost) and where the fleet's cards are, with the reason of each Blocked one.
 
 The same trace is shown in four more places:
 
@@ -415,7 +421,7 @@ A read that fails never becomes a fact. A document whose listing failed is `unkn
 - Closing the hub issue of a cross-repository Story when it reaches Done, and a Bug or a Task across several repositories.
 - QA.
 - In the fleet: dispatching to a named developer from the screens (the command does it), the extra tracks of spec-wave's queue label (`devAgent.queues`), and rounds inside a run.
-- The Observability screen, tokens and cost on an item's card, and a `projects` section in Heimdall's briefing.
+- On the Observability screen: cost by model, critique attempts per document, and the time from Ready to Review.
 - Recording a Tech Leader's decision on a finding (`risk-accepted`).
 - Driving the repository's own Actions by trigger label instead of agent-mux's flows.
 - Editing an item's title, body, milestone or priority from agent-mux.

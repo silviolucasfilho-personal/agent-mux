@@ -2645,6 +2645,17 @@ fn cmd_show(a: &Args) -> anyhow::Result<()> {
     for line in card_lines(item, &s) {
         println!("{line}");
     }
+    // what its steps' sessions cost, from the trace store
+    {
+        use crate::tracing::project_report as pr;
+        if let Ok(all) = pr::hub_launches(&e.conn, &s.hub, 0)
+            && let Some(line) = pr::item_totals(&all, Some(&s), super::now_ns())
+                .get(&n)
+                .and_then(pr::card_line)
+        {
+            println!("{line}");
+        }
+    }
     Ok(())
 }
 
