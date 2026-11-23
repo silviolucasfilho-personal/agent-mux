@@ -1,6 +1,6 @@
 # Projects: every spec-wave flow, in agent-mux — design
 
-Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, and the first three parts of phase 4 (§19 to §25); nothing else is.
+Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, and the first four parts of phase 4 (§19 to §26); nothing else is.
 
 **The requirement.** Any repository configured with spec-wave must open in
 agent-mux as a **Project** and work there: every flow spec-wave has, each
@@ -1307,3 +1307,68 @@ report grouped by workflow run, `StepRun`), `run_line`, `session_steps`
 - **Not built from §9.3:** tokens and cost on the cards, the
   Observability screen, Heimdall's `projects` section, the web pages
   and the timeline view of `trace project`.
+
+## 26. Phase 4, fourth part, as built
+
+Built on 2026-11-23: a Feature as a stack (§7.2), a Story across
+repositories (§7.3) and a Task on its own (§7.1). `src/project/stack.rs`
+is the port of spec-wave's `planFeatureImplementation`,
+`featureCanAdvance` and `lib/pr-ready.mjs`; the rest is in
+`project::build` and `project::cli`.
+
+- **One run per Story, not one for the Feature.** spec-wave hands the
+  whole Feature to one session, which opens the pull requests itself.
+  Here `project run <feature>` (`Planned::Stack`, `stack::plan`) loops
+  over the pending Stories and each is the build of §23: work, an
+  independent review, a delivery by Rust. A stack that stops resumes at
+  the Story it stopped on, because the plan is made again from GitHub.
+- **The base of a build** (`stack::base_for`): the branch of the nearest
+  Story before it, in the Feature's order, with an open pull request in
+  the same repository; else the default branch. It is applied to a Story
+  run on its own too, so "build Story by Story" and "build the Feature"
+  give the same stack.
+- **A dependency with an open pull request counts as met**
+  (`build::dependency_met`); §23 asked for it to be merged. After the
+  base is fetched, `build::check_stack` verifies with `git merge-base
+  --is-ancestor` that each such dependency's branch, in this repository,
+  is under the base, and refuses the build when one is not.
+- **A pending Story with no Task stops the stack** (§7.2); a Story run on
+  its own is still built from its description, as in §23.
+- **Marking ready** (`stack::mark_ready`, called by `Ctx::build_finish`):
+  when every open Story of the Feature is in code review or further on,
+  the open pull requests that name the Feature or one of its Stories
+  (`stack::collect`, read then from the hub and every code repository by
+  their closing lines) and are drafts are marked ready with `gh pr
+  ready`. So a Feature with one Story has its pull request marked ready
+  at once, as in spec-wave; a Story with no Feature, a Bug and a Task
+  stay drafts. `--keep-drafts` skips it. Best effort: a draft that could
+  not be marked is a line.
+- **The snapshot links the hub's stacked pull requests** by their text
+  (`snapshot::build` over the hub's open pull requests), since GitHub
+  records its own link only for a pull request based on the default
+  branch; `snapshot::merge` keeps such a link across the re-read of one
+  issue. This is the read §24 left for the stack, and `project merge`
+  now finds the upper pull requests of a stack.
+- **A Story across repositories** (`build::targets`, `build::Part`,
+  `part_note`): one run per repository, in the order of the labels, the
+  next being the first with no pull request of the Story. The board
+  moves and the drafts are marked only after the last (`Part::last`).
+  The Story's context gains a section naming the session's repository,
+  and both step skills say that a Task or criterion wholly of another
+  repository passes there. The spec's "one worktree per repository" is
+  kept; "worked by one run" is not: no session sees two repositories.
+  A Story is `pr-pending` only when each of its repositories has a pull
+  request (`decision`, counted by repository).
+- **Not built from §7.3:** closing the hub issue when a cross-repository
+  Story reaches Done. A Bug or a Task with several labels is refused.
+- **A Task on its own** (`BuildKind::Task`, `task_context`): branch
+  `task/<n>-<slug>`, a draft pull request closing the Task, the Task to
+  Development / In Progress and then Done / Done as spec-wave's
+  `planBoardMoves` does for a single Task; its Story and Feature are not
+  moved. It runs the flow `project-story` with the skills' `story` kind.
+  §7.1 makes it a factory item; it is a Project build like the others.
+  A Task whose Story is in code review is refused (`with-story`).
+- **Still not built in phase 4:** `project workspace`, the fleet (§8),
+  chat, refine and estimate on an item, the `/project` skill and the
+  other MCP tools; from §9.3, the cards' tokens and cost, the
+  Observability screen and Heimdall's `projects` section.

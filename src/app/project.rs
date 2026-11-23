@@ -950,19 +950,39 @@ impl ProjectView {
                     if !d.runnable() {
                         return Some(Outcome::Notice(format!("#{}: {line}", it.number)));
                     }
-                    let bug = it.item_type == Some(ItemType::Bug);
+                    let (what, lines): (&str, Vec<String>) = match it.item_type {
+                        Some(ItemType::Feature) => (
+                            "Build Feature",
+                            vec![
+                                "Each pending Story is built by a session on Claude Code in a worktree, forked from the pull request of the Story before it in the same repository, and reviewed by a second session.".into(),
+                                "After each approval agent-mux pushes the branch, opens a draft pull request and moves the Story to Code Review. A Story that is not approved stops the stack; running the Feature again resumes.".into(),
+                                "When the last Story is delivered, the Feature's pull requests are marked ready for review together and the Feature moves to Code Review.".into(),
+                                "It takes minutes per Story; nothing is merged.".into(),
+                            ],
+                        ),
+                        Some(ItemType::Task) => (
+                            "Build Task",
+                            vec![
+                                "A session on Claude Code writes this Task alone in a worktree of the code repository, forked from its default branch, and commits it.".into(),
+                                "A second session reviews the committed diff; the work goes back to the first at most twice.".into(),
+                                "If the review approves, agent-mux pushes the branch, opens a draft pull request for the Task and moves it to Done.".into(),
+                                "It takes minutes; nothing is merged.".into(),
+                            ],
+                        ),
+                        t => (
+                            if t == Some(ItemType::Bug) { "Fix Bug" } else { "Build Story" },
+                            vec![
+                                "A session on Claude Code writes the code in a worktree of the code repository, forked from its default branch or from the pull request of the Story it is stacked on, and commits it. A Story that changes several repositories is built one repository at a time.".into(),
+                                "A second session reviews the committed diff; the work goes back to the first at most twice.".into(),
+                                "If the review approves, agent-mux pushes the branch, opens a draft pull request and moves the board to Code Review. The last Story of a Feature marks the Feature's pull requests ready for review.".into(),
+                                "The board moves to Desenvolvimento as soon as it starts. It takes minutes; nothing is merged.".into(),
+                            ],
+                        ),
+                    };
+                    let mut all = vec![format!("{what} #{}: {line}", it.number)];
+                    all.extend(lines);
                     self.modal = Some(Modal::Confirm {
-                        lines: vec![
-                            format!(
-                                "{} #{}: {line}",
-                                if bug { "Fix Bug" } else { "Build Story" },
-                                it.number
-                            ),
-                            "A session on Claude Code writes the code in a worktree of the code repository, forked from its default branch, and commits it.".into(),
-                            "A second session reviews the committed diff; the work goes back to the first at most twice.".into(),
-                            "If the review approves, agent-mux pushes the branch, opens a draft pull request and moves the board to Code Review.".into(),
-                            "The board moves to Desenvolvimento as soon as it starts. It takes minutes; nothing is merged.".into(),
-                        ],
+                        lines: all,
                         op: Op::RunStep {
                             number: it.number,
                             apply: false,

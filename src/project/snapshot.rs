@@ -285,6 +285,28 @@ pub fn build(raw: &Raw, cfg: &ProjectConfig, now_ns: i64) -> Snapshot {
         }
     }
 
+    // the hub's own open pull requests, by the issue they name: GitHub
+    // records its link only for a pull request based on the default
+    // branch, so the upper ones of a stack are found by their text
+    if let Ok(pulls) = &raw.open_pulls {
+        for p in pulls {
+            let said = format!("{}\n{}", text(p, "title"), text(p, "body"));
+            for n in contract::closing_refs(&said, &hub, &hub) {
+                let Some(pull) = pull_of(p, &hub) else {
+                    continue;
+                };
+                if let Some(item) = items.iter_mut().find(|i| i.number == n)
+                    && !item
+                        .pulls
+                        .iter()
+                        .any(|x| x.repo.eq_ignore_ascii_case(&pull.repo) && x.number == pull.number)
+                {
+                    item.pulls.push(pull);
+                }
+            }
+        }
+    }
+
     // a child the parent lists but whose own `parent` was not read
     let links: Vec<(u64, u64)> = items
         .iter()
@@ -367,7 +389,12 @@ pub fn merge(snap: &mut Snapshot, nodes: &[Value], cfg: &ProjectConfig) {
             Some(old) => {
                 item.docs = std::mem::take(&mut old.docs);
                 for p in old.pulls.drain(..) {
-                    if !p.repo.eq_ignore_ascii_case(&snap.hub)
+                    // what this read cannot see is kept: a code repository's
+                    // pull request, and a hub one stacked on another branch,
+                    // which GitHub does not link to the issue
+                    let unseen = !p.repo.eq_ignore_ascii_case(&snap.hub)
+                        || (p.open() && p.base != snap.default_branch);
+                    if unseen
                         && !item
                             .pulls
                             .iter()
@@ -580,6 +607,43 @@ pub(crate) mod tests {
             (pulls[0].repo.as_str(), pulls[0].number, pulls[0].draft),
             ("acme/api", 12, true)
         );
+    }
+
+    #[test]
+    fn a_stacked_pull_request_of_the_hub_is_linked_by_the_issue_it_names() {
+        let mut r = raw();
+        r.open_pulls = Ok(vec![
+            json!({"number": 40, "headRefName": "spec-wave/4-bug"}),
+            json!({"number": 51, "title": "filtrar", "body": "Closes #3",
+                   "state": "OPEN", "isDraft": true, "url": "u51",
+                   "headRefName": "story/3-filtrar", "baseRefName": "story/2-ver",
+                   "reviewDecision": ""}),
+            json!({"number": 52, "title": "outro", "body": "Closes acme/other#3",
+                   "state": "OPEN", "isDraft": true, "url": "u52",
+                   "headRefName": "x", "baseRefName": "main", "reviewDecision": ""}),
+        ]);
+        let mut s = build(&r, &cfg(), 0);
+        let pulls = &s.item(3).unwrap().pulls;
+        assert_eq!(pulls.len(), 1, "{pulls:?}");
+        assert_eq!(
+            (
+                pulls[0].repo.as_str(),
+                pulls[0].number,
+                pulls[0].base.as_str()
+            ),
+            ("acme/hub", 51, "story/2-ver")
+        );
+        // a second read of the issue alone does not see it, and keeps it
+        let again: Vec<Value> = r
+            .issues
+            .iter()
+            .filter(|i| i["number"] == 3)
+            .cloned()
+            .collect();
+        merge(&mut s, &again, &cfg());
+        let pulls = &s.item(3).unwrap().pulls;
+        assert_eq!(pulls.len(), 1, "{pulls:?}");
+        assert_eq!(pulls[0].number, 51);
     }
 
     #[test]

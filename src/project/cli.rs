@@ -41,7 +41,7 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
         blocks it: marking a pull request ready is your review. Each merge is a
         merge commit, moves the item to QA, and the branches go at the end
 
-  agent-mux project run <n> [--step spec|plan|bug|critique|validate|build|fix|fix-pr] [--harness H] [--critic H] [--dry-run] [--apply] [--ignore-dependencies]
+  agent-mux project run <n> [--step spec|plan|bug|critique|validate|build|fix|fix-pr] [--harness H] [--critic H] [--dry-run] [--apply] [--ignore-dependencies] [--keep-drafts]
         run the item's next document step: a read-only session writes the document,
         agent-mux publishes it by pull request and comments on the issue; a plan and
         a bug document are then audited by a second session; a decomposition is
@@ -51,6 +51,12 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
         writes and commits the code in a worktree of the code repository, a second
         one reviews the diff, and agent-mux pushes the branch, opens a draft pull
         request and moves the board to Code Review. Nothing is merged
+        on a Feature whose Stories are Ready, it builds them as a stack: one Story
+        at a time in dependency order, each forked from the pull request of the
+        Story before it in the same repository, every pull request a draft. When
+        the last Story is delivered the Feature's pull requests are marked ready
+        together (--keep-drafts leaves them). A stack that stops resumes when the
+        Feature is run again
         --step fix-pr on a Story or Bug with an open pull request: a session fixes
         what the open review comments ask for on the pull request's branch, a
         second one reviews the fixes, and agent-mux pushes them, answers each
@@ -714,75 +720,100 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
                 break;
             }
             Planned::Build(b) => {
-                let reviewer = "another harness when one is installed";
-                println!(
-                    "  next: {} #{n} with the flow {} on {}",
-                    if b.kind == super::build::BuildKind::Bug {
-                        "fix Bug"
-                    } else {
-                        "build Story"
-                    },
-                    b.flow,
-                    harness.as_str()
-                );
-                println!(
-                    "  where: {} ({}), a worktree forked from origin/{}",
-                    b.target.dir.display(),
-                    b.target.repo.slug(),
-                    b.base
-                );
-                for t in &b.tasks {
-                    println!(
-                        "    Task #{} {}",
-                        t.number,
-                        super::contract::strip_tag(&t.title)
-                    );
-                }
-                for line in &b.notes {
-                    println!("  {line}");
-                }
-                println!("  then: an independent review of the committed diff, on {reviewer}");
-                println!(
-                    "  then: push `{}`, open a draft pull request, move the board to Code Review",
-                    b.branch
-                );
                 if a.flag("--dry-run") {
+                    print_build(&b, harness);
                     break;
                 }
-                // what can fail cheaply fails before the board says development
-                crate::factory::deliver::fetch(&b.target.dir, &b.base)
-                    .map_err(|x| anyhow::anyhow!(x))?;
-                let started = ctx.build_start(&b, &s);
-                finish_report(&started, &mut touched);
-                let ran = run_flow_in(
-                    b.flow,
-                    &b.target.dir,
-                    harness,
-                    b.args.clone(),
-                    Vec::new(),
-                    Some(format!("origin/{}", b.base)),
-                    super::ProjectLaunch {
-                        code_repo: Some(b.target.repo.slug()),
-                        ..launch(if b.kind == super::build::BuildKind::Bug {
-                            "fix"
-                        } else {
-                            "build"
-                        })
-                    },
-                )
-                .await;
-                let done = ran.and_then(|(result, run_dir)| {
-                    let wt = crate::app::workflows::load_step_worktrees(&run_dir).remove("build");
-                    ctx.build_finish(&b, &result, wt.as_ref(), &s)
+                let tag = launch(if b.kind == super::build::BuildKind::Bug {
+                    "fix"
+                } else {
+                    "build"
                 });
-                match done {
-                    Ok(r) => {
-                        finish_report(&r, &mut touched);
-                        langfuse_summary(&s.hub, item.number);
-                    }
+                let mut seen = s.clone();
+                match build_all(&ctx, b, &detail, &mut seen, harness, a, tag, &mut touched).await {
+                    Ok(()) => langfuse_summary(&s.hub, item.number),
                     // the board already says development: the cache must too
                     Err(e) => failed = Some(e),
                 }
+                break;
+            }
+            Planned::Stack(p) => {
+                for line in super::stack::plan_lines(&p) {
+                    println!("  {line}");
+                }
+                if a.flag("--dry-run") {
+                    break;
+                }
+                // the snapshot follows the stack: each delivered Story is in
+                // code review with its pull request, for the next one's base
+                let mut seen = s.clone();
+                let total = p.pending.len();
+                for (i, st) in p.pending.iter().enumerate() {
+                    println!("\n  [{}/{total}] Story #{} {}", i + 1, st.number, st.title);
+                    let stopped = |why: String| {
+                        format!(
+                            "the stack stopped at Story #{} ({i} of {total} delivered): {why}\n  run #{n} again to resume from it",
+                            st.number
+                        )
+                    };
+                    let Some(story) = seen.item(st.number).cloned() else {
+                        failed = Some(stopped("it is no longer in the Project".into()));
+                        break;
+                    };
+                    let planned = super::github::issue_detail(&e.tools, &e.cfg, st.number)
+                        .and_then(|d| {
+                            ctx.build_plan(&story, &d, &seen, a.flag("--ignore-dependencies"))
+                                .map(|p| (d, p))
+                        });
+                    let (detail, b) = match planned {
+                        Ok((d, Planned::Build(b))) => (d, b),
+                        Ok((_, Planned::Stopped(d))) => {
+                            for line in decision_lines(&d) {
+                                println!("  {line}");
+                            }
+                            failed = Some(stopped(d.reason.clone()));
+                            break;
+                        }
+                        Ok(_) => {
+                            failed = Some(stopped("it has no build step".into()));
+                            break;
+                        }
+                        Err(x) => {
+                            failed = Some(stopped(x));
+                            break;
+                        }
+                    };
+                    let tag = super::ProjectLaunch {
+                        hub: s.hub.clone(),
+                        item: st.number,
+                        item_type: Some(ItemType::Story.as_str().to_string()),
+                        feature: Some(n),
+                        milestone: story.milestone.clone(),
+                        step: "build".to_string(),
+                        attempt: 1,
+                        executor: "operator".to_string(),
+                        ..Default::default()
+                    };
+                    match build_all(&ctx, b, &detail, &mut seen, harness, a, tag, &mut touched)
+                        .await
+                    {
+                        Ok(()) => langfuse_summary(&s.hub, st.number),
+                        Err(x) => {
+                            failed = Some(stopped(x));
+                            break;
+                        }
+                    }
+                }
+                if failed.is_none() {
+                    println!(
+                        "\n  the stack of Feature #{n} is delivered: {total} Stor{}",
+                        if total == 1 { "y" } else { "ies" }
+                    );
+                    println!(
+                        "  next: review the pull requests, then `agent-mux project merge {n}`"
+                    );
+                }
+                langfuse_summary(&s.hub, n);
                 break;
             }
             Planned::FixPr(f) => {
@@ -993,6 +1024,145 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
         anyhow::bail!("#{n}: {e}");
     }
     Ok(())
+}
+
+/// What a planned build will do, before it starts.
+fn print_build(b: &super::build::Build, harness: Harness) {
+    println!(
+        "  next: {} #{} with the flow {} on {}",
+        match b.kind {
+            super::build::BuildKind::Bug => "fix Bug",
+            super::build::BuildKind::Story => "build Story",
+            super::build::BuildKind::Task => "build Task",
+        },
+        b.number,
+        b.flow,
+        harness.as_str()
+    );
+    println!(
+        "  where: {} ({}), a worktree forked from origin/{}",
+        b.target.dir.display(),
+        b.target.repo.slug(),
+        b.base
+    );
+    for t in &b.tasks {
+        println!(
+            "    Task #{} {}",
+            t.number,
+            super::contract::strip_tag(&t.title)
+        );
+    }
+    for line in &b.notes {
+        println!("  {line}");
+    }
+    println!(
+        "  then: an independent review of the committed diff, on another harness when one is installed"
+    );
+    println!(
+        "  then: push `{}`, open a draft pull request, move {}",
+        b.branch,
+        if b.kind == super::build::BuildKind::Task {
+            "the Task to Done"
+        } else {
+            "the board to Code Review"
+        }
+    );
+}
+
+/// Runs a planned build to its end, one repository after another when the
+/// Story changes several. `seen` follows what was delivered: the pull
+/// request of each run, and the item in code review after the last, so
+/// the next plan (the next repository, the next Story of a stack) reads
+/// it.
+#[allow(clippy::too_many_arguments)]
+async fn build_all(
+    ctx: &steps::Ctx<'_>,
+    mut b: Box<super::build::Build>,
+    detail: &super::github::Detail,
+    seen: &mut Snapshot,
+    harness: Harness,
+    a: &Args,
+    tag: super::ProjectLaunch,
+    touched: &mut Vec<u64>,
+) -> Result<(), String> {
+    loop {
+        b.keep_drafts = a.flag("--keep-drafts");
+        print_build(&b, harness);
+        let t = super::ProjectLaunch {
+            code_repo: Some(b.target.repo.slug()),
+            ..tag.clone()
+        };
+        let url = run_build(ctx, &b, seen, harness, t, touched).await?;
+        let more = b.part.as_ref().is_some_and(|p| !p.last());
+        if let Some(it) = seen.items.iter_mut().find(|x| x.number == b.number) {
+            if !more && b.kind != super::build::BuildKind::Task {
+                it.stage = Some(super::contract::STAGE_CODE_REVIEW.to_string());
+            }
+            if let Some(url) = url {
+                it.pulls.push(super::Pull {
+                    repo: b.target.repo.slug(),
+                    number: url
+                        .rsplit('/')
+                        .next()
+                        .and_then(|x| x.parse().ok())
+                        .unwrap_or(0),
+                    url,
+                    state: "OPEN".into(),
+                    draft: true,
+                    head: b.branch.clone(),
+                    base: b.base.clone(),
+                    review: String::new(),
+                });
+            }
+        }
+        if !more {
+            return Ok(());
+        }
+        let item = seen
+            .item(b.number)
+            .cloned()
+            .ok_or_else(|| format!("#{} is no longer in the Project", b.number))?;
+        b = match ctx.build_plan(&item, detail, seen, a.flag("--ignore-dependencies"))? {
+            Planned::Build(next) => next,
+            Planned::Stopped(d) => return Err(d.reason),
+            _ => return Err(format!("#{} has no build step left", b.number)),
+        };
+        println!();
+    }
+}
+
+/// Runs a planned build: the base fetched and the stack checked (what
+/// can fail cheaply fails before the board says development), the board,
+/// the flow, the delivery. Answers the pull request's URL.
+async fn run_build(
+    ctx: &steps::Ctx<'_>,
+    b: &super::build::Build,
+    s: &Snapshot,
+    harness: Harness,
+    tag: super::ProjectLaunch,
+    touched: &mut Vec<u64>,
+) -> Result<Option<String>, String> {
+    crate::factory::deliver::fetch(&b.target.dir, &b.base)?;
+    super::build::check_stack(b)?;
+    let started = ctx.build_start(b, s);
+    finish_report(&started, touched);
+    let (result, run_dir) = run_flow_in(
+        b.flow,
+        &b.target.dir,
+        harness,
+        b.args.clone(),
+        Vec::new(),
+        Some(format!("origin/{}", b.base)),
+        tag,
+    )
+    .await?;
+    let wt = crate::app::workflows::load_step_worktrees(&run_dir).remove("build");
+    let r = ctx.build_finish(b, &result, wt.as_ref(), s)?;
+    finish_report(&r, touched);
+    Ok(r.lines
+        .iter()
+        .find_map(|l| l.strip_prefix(super::build::OPENED_PR))
+        .map(|u| u.trim().to_string()))
 }
 
 fn finish_report(r: &ops::Report, touched: &mut Vec<u64>) {

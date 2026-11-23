@@ -148,15 +148,44 @@ Otherwise nothing is pushed and nothing is written to GitHub but the board's fir
 
 What stops a build before it starts, each with its reason:
 
-- **A dependency that is not merged** (`Depende de:` or blocked-by on an item that is open and before QA). The build forks from the default branch, which would not have that code. `--ignore-dependencies` builds anyway, and the session is told.
+- **A dependency with no code yet** (`Depende de:` or blocked-by on an item that is open, before QA and has no open pull request). `--ignore-dependencies` builds anyway, and the session is told. A dependency with an open pull request does not stop it: the build is stacked on it (below).
 - **An open pull request** for the item: review it, or close it to build again.
 - **The branch already on the remote** with no pull request: open the pull request from it, or delete it.
-- **A Task** on its own: it is built with its Story.
-- **A Feature**: its Stories are built one at a time, and the message names the next in order.
+- **A Task whose Story is in code review**: the Story's pull request carries it.
+- **A Feature whose stack cannot be planned**: its pending Stories depend on each other in a cycle, or one has no Task.
 
-Where the code goes: the repository of the item's `repo:<slug>` label, found as spec-wave finds it (a `dirs` entry in the hub's `.spec-wave/workspace.json`, the folder beside the hub, then `.spec-wave/repos/<slug>` in the hub). An item with no label is built in the hub. The folder must be a checkout of that repository. An item with several labels is not built yet.
+Where the code goes: the repository of the item's `repo:<slug>` label, found as spec-wave finds it (a `dirs` entry in the hub's `.spec-wave/workspace.json`, the folder beside the hub, then `.spec-wave/repos/<slug>` in the hub). An item with no label is built in the hub. The folder must be a checkout of that repository. A Story with several labels is built one repository at a time (below); a Bug or a Task with several is not built yet.
 
 Commits carry spec-wave's trailers (`Spec-Wave-Story: #n`, `Spec-Wave-Tasks: #a, #b`), which its `merge` reads. The session is asked for them; when no commit has them, agent-mux adds one empty commit that does.
+
+### A Feature as a stack
+
+`project run <feature>` on a Feature whose document flow is over builds its pending Stories one at a time, in the order of their dependencies:
+
+```
+agent-mux project run <feature> --dry-run     the Stories it would build, in order, and the ones it leaves alone
+agent-mux project run <feature>               build them
+agent-mux project run <feature> --keep-drafts leave every pull request a draft at the end
+```
+
+- **Each Story is its own build** (the two sessions and the delivery above). Its worktree forks from the branch of the Story before it, in the Feature's order, that has an open pull request in the same repository, and its pull request is based on that branch; with none, the default branch. A stack is per repository.
+- **Stories in code review or further on are not touched.** A pending Story with no Task, or a cycle among the pending ones, stops the plan before anything runs.
+- **Every pull request stays a draft** until the last Story is delivered. Then agent-mux marks the Feature's draft pull requests ready for review together (`gh pr ready`) and the Feature moves to Code Review. This is the one place agent-mux takes a pull request out of draft.
+- **A Story that is not approved stops the stack.** What was delivered stays; running the Feature again resumes at the Story it stopped on.
+
+Running one Story on its own follows the same rules: it is stacked on the Story before it when that one has an open pull request, and when it is the last of its Feature it marks the Feature's drafts ready. Before the session starts agent-mux checks that every dependency with an open pull request in the repository is under the branch the build forks from, and says which is not.
+
+`agent-mux project merge <feature>` merges a stack in order: it points each pull request at the default branch before merging it and deletes the branches at the end.
+
+### A Story across repositories
+
+A Story with several `repo:<slug>` labels is built one repository at a time, in the order of the labels: one run (two sessions), one branch and one draft pull request in each, all with `Closes <owner>/<hub>#<n>`. Each session is told which repository is its own, which are the others and which were delivered already, and that a Task or criterion that belongs wholly to another repository does not apply to it. The board moves to Code Review, and a Feature's drafts are marked ready, only after the last repository. A run that stops resumes at the first repository with no pull request.
+
+GitHub closes no issue from another repository's pull request, so the hub issue of such a Story stays open after the merge; agent-mux does not close it yet.
+
+### A Task on its own
+
+`project run <task>` builds one Task alone: its own branch (`task/<n>-<slug>`), its own draft pull request with `Closes <owner>/<hub>#<n>`, and the Task at Done when it is delivered. Its commits carry the Story's trailer and its own. Running the Story builds all its Tasks in one pull request instead; once the Story is in code review its Tasks are not built on their own.
 
 ### Fixing what a review asked for
 
@@ -255,7 +284,7 @@ agent-mux project triage reject <n> --reason "…"
 agent-mux project triage duplicate <n> --of <original>
 agent-mux project advance [--yes]
 agent-mux project merge <n> [--yes] [--keep-branches] [--dry-run]
-agent-mux project run <n> [--step …] [--harness H] [--critic H] [--dry-run] [--apply] [--ignore-dependencies]
+agent-mux project run <n> [--step …] [--harness H] [--critic H] [--dry-run] [--apply] [--ignore-dependencies] [--keep-drafts]
 ```
 
 The first block reads. The second writes to GitHub at once, with no confirmation: typing the command is the confirmation. `advance` and `merge` alone print their plan and need `--yes`. `task start` refuses while another Task of the same Story is in progress.
@@ -286,7 +315,7 @@ A read that fails never becomes a fact. A document whose listing failed is `unkn
 
 ## 9. Not built yet
 
-- A Feature built as a stack of Stories with its pull requests marked ready together, and a Story across several repositories.
+- Closing the hub issue of a cross-repository Story when it reaches Done, and a Bug or a Task across several repositories.
 - QA and the dev-agent fleet (dispatch, slots, the lease).
 - The Observability screen, tokens and cost on an item's card, and a `projects` section in Heimdall's briefing.
 - Recording a Tech Leader's decision on a finding (`risk-accepted`).

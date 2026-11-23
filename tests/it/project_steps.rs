@@ -68,7 +68,11 @@ case "$AGENT_MUX_WORKFLOW_STEP" in
   build)
     pwd > "$r/build.cwd"
     cp "$AGENT_MUX_WORKFLOW_CONTEXT" "$r/build.ctx.json"
-    printf 'fn pedidos() {{}}\n' > pedidos.rs
+    if [ -f pedidos.rs ]; then
+      printf 'fn filtro() {{}}\n' > filtro.rs
+    else
+      printf 'fn pedidos() {{}}\n' > pedidos.rs
+    fi
     git add -A >/dev/null 2>&1
     git commit -q -m 'feat: pedidos' >/dev/null 2>&1
     emit '{work}'
@@ -569,6 +573,127 @@ async fn a_story_is_built_reviewed_and_delivered_as_a_draft() {
     );
     assert!(
         !calls.contains("pr merge") && !calls.contains("pr ready"),
+        "{calls}"
+    );
+
+    // 4. the next Story of the Feature is stacked on this one: it forks
+    // from the delivered branch, and its pull request is based on it
+    let mut top = feature();
+    top.number = 3;
+    top.children = vec![12, 15];
+    let mut below = story.clone();
+    below.parent = Some(3);
+    below.stage = Some("👀 Code Review".into());
+    below.pulls = vec![agent_mux::project::Pull {
+        repo: "acme/hub".into(),
+        number: 7,
+        url: "https://github.com/acme/hub/pull/7".into(),
+        state: "OPEN".into(),
+        draft: true,
+        head: "story/12-ver-pedidos".into(),
+        base: "main".into(),
+        review: String::new(),
+    }];
+    let mut next = story.clone();
+    next.number = 15;
+    next.node_id = "I_15".into();
+    next.title = "[STORY] Filtrar pedidos".into();
+    next.parent = Some(3);
+    next.depends_on = vec![12];
+    let snap = agent_mux::project::Snapshot {
+        hub: "acme/hub".into(),
+        items: vec![top, below, next.clone()],
+        ..Default::default()
+    };
+    let detail = Detail {
+        title: next.title.clone(),
+        body: "Filtrar por mês\n\n## Critérios de aceite\n\n- lista paginada".into(),
+        url: "https://github.com/acme/hub/issues/15".into(),
+        comments: vec![],
+    };
+    let ctx = Ctx {
+        tools: &f.tools,
+        cfg: &cfg,
+        hub_root: f.hub.clone(),
+        scratch: f.root.join("scratch"),
+    };
+    let Planned::Build(b) = ctx.build_plan(&next, &detail, &snap, false).unwrap() else {
+        panic!("the stacked Story's step is not a build")
+    };
+    assert_eq!(
+        (b.base.as_str(), b.branch.as_str(), b.stacked_on, b.feature),
+        (
+            "story/12-ver-pedidos",
+            "story/15-filtrar-pedidos",
+            Some(12),
+            Some(3)
+        )
+    );
+    assert_eq!(b.under, vec![(12, "story/12-ver-pedidos".to_string())]);
+    assert!(
+        b.notes.iter().any(|n| n.contains("stacked on Story #12")),
+        "{:?}",
+        b.notes
+    );
+    agent_mux::factory::deliver::fetch(&b.target.dir, &b.base).unwrap();
+    build::check_stack(&b).unwrap();
+    let (result, run_id) = run_flow_from(
+        &mut f,
+        b.flow,
+        b.args.clone(),
+        Some(format!("origin/{}", b.base)),
+    )
+    .await;
+    assert_eq!(result["outcome"], "approved", "{result}");
+    let run_dir = agent_mux::workflows::context::run_dir(&f.app.workflows_runtime_dir(), &run_id);
+    let wt = agent_mux::app::workflows::load_step_worktrees(&run_dir)
+        .remove("build")
+        .expect("the stacked build left no worktree");
+    let ctx = Ctx {
+        tools: &f.tools,
+        cfg: &cfg,
+        hub_root: f.hub.clone(),
+        scratch: f.root.join("scratch"),
+    };
+    ctx.build_finish(&b, &result, Some(&wt), &snap).unwrap();
+    // the branch holds the Story below it and its own work, and nothing else moved
+    assert_eq!(
+        git(&origin, &["show", "story/15-filtrar-pedidos:filtro.rs"]),
+        "fn filtro() {}"
+    );
+    assert_eq!(
+        git(&origin, &["show", "story/15-filtrar-pedidos:pedidos.rs"]),
+        "fn pedidos() {}"
+    );
+    assert_eq!(
+        git(
+            &origin,
+            &[
+                "rev-list",
+                "--count",
+                "story/12-ver-pedidos..story/15-filtrar-pedidos"
+            ]
+        ),
+        "2",
+        "the Story's commit and its trail"
+    );
+    assert_eq!(git(&origin, &["rev-parse", "main"]), main_before);
+    let calls = std::fs::read_to_string(f.root.join("gh-calls")).unwrap();
+    let pr = calls
+        .lines()
+        .filter(|l| l.starts_with("pr create"))
+        .nth(1)
+        .unwrap();
+    assert!(
+        pr.starts_with(
+            "pr create --draft --base story/12-ver-pedidos --head story/15-filtrar-pedidos --title Filtrar pedidos"
+        ),
+        "{pr}"
+    );
+    assert!(pr.contains("Closes acme/hub#15"), "{pr}");
+    // the stand-in `gh` cannot say where the Feature's Stories are: the drafts stay
+    assert!(
+        !calls.contains("pr ready") && !calls.contains("pr merge"),
         "{calls}"
     );
 }
