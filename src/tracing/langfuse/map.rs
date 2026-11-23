@@ -16,8 +16,10 @@
 
 use crate::bus::swarm::SwarmLaunch;
 use crate::config::ResolvedTracing;
+use crate::project::ProjectLaunch;
 use crate::tracing::ids;
 use crate::tracing::pricing::{Cost, PriceTable, cost_for};
+use crate::tracing::project_report::ProjectReport;
 use crate::tracing::store::model::{
     LaunchRow, Level, ObservationRow, ObservationType, StoreOp, TraceRow, TraceStatus,
 };
@@ -40,6 +42,10 @@ pub struct MapCtx {
     /// swarm tags. Learned from `StoreOp::Launch` rows as they pass
     /// ([`MapCtx::note_launch`]) or seeded from the store for a replay.
     pub swarms: HashMap<String, SwarmLaunch>,
+    /// The launches a Project step started (Projects spec §9.3), by launch
+    /// id: their turns get `session.id = <hub>#<item>` and the project
+    /// tags. Learned and seeded as `swarms` is.
+    pub projects: HashMap<String, ProjectLaunch>,
 }
 
 impl MapCtx {
@@ -52,13 +58,17 @@ impl MapCtx {
             environment: settings.environment.clone(),
             tags: settings.tags.clone(),
             swarms: HashMap::new(),
+            projects: HashMap::new(),
         }
     }
 
-    /// Remembers a launch's swarm, from its row's metadata.
+    /// Remembers a launch's swarm or Project step, from its row's metadata.
     pub fn note_launch(&mut self, l: &LaunchRow) {
         if let Some(sw) = l.metadata.as_ref().and_then(SwarmLaunch::from_metadata) {
             self.swarms.insert(l.id.clone(), sw);
+        }
+        if let Some(p) = l.metadata.as_ref().and_then(ProjectLaunch::from_metadata) {
+            self.projects.insert(l.id.clone(), p);
         }
     }
 }
@@ -296,7 +306,29 @@ fn trace_span(t: &TraceRow, ctx: &MapCtx) -> Event {
             metadata.insert("harness_session".into(), Value::from(t.session_id.clone()));
             sw.swarm_id.clone()
         }
-        None => t.session_id.clone(),
+        None => match t.launch_id.as_deref().and_then(|l| ctx.projects.get(l)) {
+            // a Project step's turn: one Langfuse session per work item
+            // (Projects spec §9.3), so every step of the item lists together
+            Some(p) => {
+                tags.push("project".into());
+                tags.push(format!("project:{}", p.step));
+                if let Some(m) = &p.milestone {
+                    tags.push(format!("milestone:{m}"));
+                }
+                metadata.insert("project_hub".into(), Value::from(p.hub.clone()));
+                metadata.insert("project_item".into(), Value::from(p.item));
+                put(&mut metadata, "project_type", p.item_type.clone());
+                put(&mut metadata, "project_feature", p.feature);
+                metadata.insert("project_step".into(), Value::from(p.step.clone()));
+                metadata.insert("project_attempt".into(), Value::from(p.attempt));
+                metadata.insert("project_role".into(), Value::from(p.role.clone()));
+                metadata.insert("project_run".into(), Value::from(p.run.clone()));
+                put(&mut metadata, "project_code_repo", p.code_repo.clone());
+                metadata.insert("harness_session".into(), Value::from(t.session_id.clone()));
+                project_session_id(&p.hub, p.item)
+            }
+            None => t.session_id.clone(),
+        },
     };
     let name: String = t.name.chars().take(1000).collect();
     let mut attrs = common_attrs(ctx);
@@ -475,6 +507,204 @@ fn observation_span(o: &ObservationRow, ctx: &MapCtx) -> Event {
         kind,
         json,
     }
+}
+
+/// The Langfuse session of a work item: `<hub>#<n>`.
+pub fn project_session_id(hub: &str, item: u64) -> String {
+    format!("{hub}#{item}")
+}
+
+/// The item's summary trace id: one deterministic trace per work item.
+pub fn project_trace_id(hub: &str, item: u64) -> String {
+    ids::trace_id_hex(&format!("amx1|project|{}|{item}", hub.to_lowercase()))
+}
+
+/// The summary trace of a work item (Projects spec §9.3): one trace named
+/// after the item in its Langfuse session, with a root span for the item
+/// and a child span per run of a step (its sessions, tokens, cost, and the
+/// sessions' trace ids as metadata, since OTLP cannot parent a span across
+/// traces). Sent when a build or a fix is delivered and by `langfuse
+/// export-project`; the ids are deterministic, so sending it again updates
+/// it.
+pub fn project_summary(r: &ProjectReport, ctx: &MapCtx) -> Vec<Event> {
+    let runs = crate::tracing::project_report::runs(r);
+    let hub = r.hub.to_lowercase();
+    let trace_id = project_trace_id(&r.hub, r.item);
+    let root_id = ids::span_id_hex(&format!("amx1|project|root|{hub}|{}", r.item));
+    let head = r.items.first();
+    let kind = head.and_then(|i| i.item_type.as_deref()).unwrap_or("item");
+    let name = text(
+        &format!(
+            "{kind} #{}{}",
+            r.item,
+            head.filter(|i| !i.title.is_empty())
+                .map(|i| format!(" {}", i.title))
+                .unwrap_or_default()
+        ),
+        200,
+    );
+    let now = crate::tracing::store::now_ns();
+    let start = r.launches.first().map_or(now, |l| l.started_ns);
+    let end = r
+        .launches
+        .iter()
+        .map(|l| l.ended_ns.unwrap_or(now))
+        .max()
+        .unwrap_or(start);
+    let session = project_session_id(&r.hub, r.item);
+
+    let mut tags = ctx.tags.clone();
+    tags.push("project".into());
+    tags.push("project:summary".into());
+    for l in &r.launches {
+        if !tags.contains(&l.provider) {
+            tags.push(l.provider.clone());
+        }
+        if let Some(m) = &l.project.milestone {
+            let tag = format!("milestone:{m}");
+            if !tags.contains(&tag) {
+                tags.push(tag);
+            }
+        }
+    }
+    let mut metadata = Map::new();
+    metadata.insert("project_hub".into(), Value::from(r.hub.clone()));
+    metadata.insert("project_item".into(), Value::from(r.item));
+    put(
+        &mut metadata,
+        "project_type",
+        head.and_then(|i| i.item_type.clone()),
+    );
+    metadata.insert(
+        "items".into(),
+        Value::Array(r.items.iter().map(|i| Value::from(i.number)).collect()),
+    );
+    metadata.insert("runs".into(), Value::from(runs.len()));
+    metadata.insert(
+        "launches".into(),
+        Value::Array(
+            r.launches
+                .iter()
+                .map(|l| Value::from(l.launch_id.clone()))
+                .collect(),
+        ),
+    );
+    put(&mut metadata, "tokens", r.tokens);
+    put(&mut metadata, "cost_usd", r.cost_usd);
+    metadata.insert("unpriced".into(), Value::Bool(r.unpriced));
+    let output = format!(
+        "{} run(s) · {} session(s) · {} tok · {}",
+        runs.len(),
+        r.launches.len(),
+        r.tokens
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "—".into()),
+        r.cost_usd
+            .map(|c| format!("${c:.2}"))
+            .unwrap_or_else(|| "—".into()),
+    );
+    let mut attrs = common_attrs(ctx);
+    attrs.push(attr(OBSERVATION_TYPE, any_str("span")));
+    attrs.push(attr(TRACE_NAME, any_str(name.clone())));
+    attrs.push(attr(TRACE_SESSION_ID, any_str(session)));
+    push_str_attr(&mut attrs, TRACE_USER_ID, ctx.user_id.clone());
+    attrs.push(attr(TRACE_OUTPUT, any_str(output.clone())));
+    attrs.push(attr(OBSERVATION_OUTPUT, any_str(output)));
+    attrs.push(attr(TRACE_TAGS, any_str(Value::from(tags).to_string())));
+    push_json_attr(&mut attrs, TRACE_METADATA, metadata.clone());
+    push_json_attr(&mut attrs, OBSERVATION_METADATA, metadata);
+    let mut events = Vec::with_capacity(1 + runs.len());
+    events.push(Event {
+        entity_id: root_id.clone(),
+        launch_id: None,
+        kind: "project",
+        json: span_json(&trace_id, &root_id, None, &name, start, end, attrs, None),
+    });
+
+    for x in &runs {
+        let of: Vec<&crate::tracing::project_report::StepLaunch> = x
+            .sessions
+            .iter()
+            .filter_map(|at| r.launches.get(*at))
+            .collect();
+        let key = if x.run.is_empty() {
+            of.first().map_or(String::new(), |l| l.launch_id.clone())
+        } else {
+            x.run.clone()
+        };
+        let span_id = ids::span_id_hex(&format!("amx1|project|run|{hub}|{}|{key}", x.item));
+        let mut m = Map::new();
+        m.insert("project_item".into(), Value::from(x.item));
+        m.insert("project_step".into(), Value::from(x.step.clone()));
+        m.insert("project_attempt".into(), Value::from(x.attempt));
+        m.insert("project_run".into(), Value::from(x.run.clone()));
+        put(&mut m, "tokens", x.tokens);
+        put(&mut m, "cost_usd", x.cost_usd);
+        m.insert("unpriced".into(), Value::Bool(x.unpriced));
+        m.insert(
+            "sessions".into(),
+            Value::Array(
+                of.iter()
+                    .map(|l| {
+                        let mut s = Map::new();
+                        s.insert("launch_id".into(), Value::from(l.launch_id.clone()));
+                        s.insert("role".into(), Value::from(l.project.role.clone()));
+                        s.insert("provider".into(), Value::from(l.provider.clone()));
+                        s.insert("turns".into(), Value::from(l.turns.len()));
+                        s.insert("tools".into(), Value::from(l.tools));
+                        s.insert("errors".into(), Value::from(l.errors));
+                        s.insert(
+                            "traces".into(),
+                            Value::Array(
+                                l.turns.iter().map(|t| Value::from(t.id.clone())).collect(),
+                            ),
+                        );
+                        Value::Object(s)
+                    })
+                    .collect(),
+            ),
+        );
+        let mut attrs = common_attrs(ctx);
+        attrs.push(attr(OBSERVATION_TYPE, any_str("agent")));
+        let out = format!(
+            "{} session(s) · {} tok · {}",
+            of.len(),
+            x.tokens
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "—".into()),
+            x.cost_usd
+                .map(|c| format!("${c:.2}"))
+                .unwrap_or_else(|| "—".into()),
+        );
+        attrs.push(attr(OBSERVATION_OUTPUT, any_str(out)));
+        push_json_attr(&mut attrs, OBSERVATION_METADATA, m);
+        let name = format!(
+            "#{} {}{}",
+            x.item,
+            x.step,
+            if x.attempt > 1 {
+                format!(" (attempt {})", x.attempt)
+            } else {
+                String::new()
+            }
+        );
+        events.push(Event {
+            entity_id: span_id.clone(),
+            launch_id: of.first().map(|l| l.launch_id.clone()),
+            kind: "project-run",
+            json: span_json(
+                &trace_id,
+                &span_id,
+                Some(&root_id),
+                &name,
+                x.started_ns,
+                x.ended_ns.unwrap_or(now),
+                attrs,
+                None,
+            ),
+        });
+    }
+    events
 }
 
 /// The swarm's trace id: one deterministic trace per swarm.
@@ -805,6 +1035,7 @@ mod tests {
             environment: Some("dev".into()),
             tags: vec!["agent-mux".into()],
             swarms: HashMap::new(),
+            projects: HashMap::new(),
         }
     }
 
@@ -969,6 +1200,111 @@ mod tests {
             gate_mode: GateMode::Chat,
             headless: false,
         }
+    }
+
+    #[test]
+    fn a_project_steps_turn_joins_the_items_langfuse_session_with_its_tags() {
+        use crate::tracing::project_report::tests::{launch_row, tag};
+        let mut ctx = ctx();
+        let mut t = trace();
+        t.launch_id = Some("L-build".into());
+        let mut step = tag(12, "build", "run-2", "build/review");
+        step.milestone = Some("v0.6".into());
+        ctx.note_launch(&launch_row("L-build", 1, Some(&step)));
+        let v = parsed(&trace_span(&t, &ctx));
+        let s = &v;
+        assert_eq!(attr_str(s, "session.id"), Some("acme/hub#12"));
+        let tags: Value =
+            serde_json::from_str(attr_str(s, "langfuse.trace.tags").unwrap()).unwrap();
+        assert_eq!(
+            tags,
+            json!([
+                "agent-mux",
+                "claude",
+                "project",
+                "project:build",
+                "milestone:v0.6"
+            ])
+        );
+        let md: Value =
+            serde_json::from_str(attr_str(s, "langfuse.trace.metadata").unwrap()).unwrap();
+        assert_eq!(md["project_hub"], "acme/hub");
+        assert_eq!(md["project_item"], 12);
+        assert_eq!(md["project_role"], "review");
+        assert_eq!(md["project_run"], "run-2");
+        assert_eq!(md["harness_session"], "sess-1");
+        // a launch with no step teaches nothing
+        ctx.note_launch(&launch_row("L-plain", 2, None));
+        assert!(!ctx.projects.contains_key("L-plain"));
+    }
+
+    #[test]
+    fn the_project_summary_is_one_trace_with_a_span_per_run() {
+        use crate::tracing::project_report::tests::tag;
+        use crate::tracing::project_report::{ItemRef, ProjectReport, StepLaunch};
+        let launch = |id: &str, at: i64, step: &str, run: &str, label: &str| StepLaunch {
+            launch_id: id.into(),
+            project: tag(12, step, run, label),
+            provider: "claude".into(),
+            session_key: Some(format!("claude:{id}")),
+            started_ns: at,
+            ended_ns: Some(at + 10),
+            turns: Vec::new(),
+            tools: 3,
+            errors: 0,
+            tokens: Some(100),
+            cost_usd: Some(0.5),
+            unpriced: false,
+        };
+        let r = ProjectReport {
+            hub: "Acme/Hub".into(),
+            item: 12,
+            items: vec![ItemRef {
+                number: 12,
+                item_type: Some("Story".into()),
+                title: "ver pedidos".into(),
+            }],
+            launches: vec![
+                launch("L-1", 100, "build", "run-2", "build"),
+                launch("L-2", 200, "build", "run-2", "build/review"),
+                launch("L-3", 300, "fix-pr", "run-3", "build"),
+            ],
+            tokens: Some(300),
+            cost_usd: Some(1.5),
+            unpriced: false,
+        };
+        let events = project_summary(&r, &ctx());
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].kind, "project");
+        assert_eq!(events[1].kind, "project-run");
+        let root = parsed(&events[0]);
+        assert_eq!(attr_str(&root, "session.id"), Some("Acme/Hub#12"));
+        assert_eq!(
+            attr_str(&root, "langfuse.trace.name"),
+            Some("Story #12 ver pedidos")
+        );
+        let tags: Value =
+            serde_json::from_str(attr_str(&root, "langfuse.trace.tags").unwrap()).unwrap();
+        assert_eq!(
+            tags,
+            json!(["agent-mux", "project", "project:summary", "claude"])
+        );
+        let md: Value =
+            serde_json::from_str(attr_str(&root, "langfuse.trace.metadata").unwrap()).unwrap();
+        assert_eq!(md["runs"], 2);
+        assert_eq!(md["tokens"], 300);
+        assert_eq!(md["launches"], json!(["L-1", "L-2", "L-3"]));
+        // the same item gives the same ids, whatever the hub's case
+        let again = project_summary(
+            &ProjectReport {
+                hub: "acme/hub".into(),
+                ..r.clone()
+            },
+            &ctx(),
+        );
+        assert_eq!(events[0].entity_id, again[0].entity_id);
+        assert_eq!(events[2].entity_id, again[2].entity_id);
+        assert_ne!(events[1].entity_id, events[2].entity_id);
     }
 
     #[test]

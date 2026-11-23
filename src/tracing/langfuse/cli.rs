@@ -1,4 +1,5 @@
-//! CLI commands for Langfuse: `agent-mux langfuse web|status|traces|export-swarm`.
+//! CLI commands for Langfuse: `agent-mux langfuse
+//! web|status|traces|export-swarm|export-project`.
 
 use crate::config::{self, resolve_langfuse};
 use crate::tracing::langfuse::api::{ListTracesParams, check_health, list_traces, resolve_web_url};
@@ -23,6 +24,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "status" | "health" => run_status(lf.as_ref()),
         "traces" | "ls" => run_traces(&args[1..], lf.as_ref()),
         "export-swarm" => run_export_swarm(&args[1..], tracing_cfg),
+        "export-project" => run_export_project(&args[1..], tracing_cfg),
         cmd => {
             eprintln!("unknown langfuse command: {cmd}\n");
             print_usage();
@@ -41,7 +43,11 @@ fn print_usage() {
           export-swarm <id> [--dry-run]\n            \
                     Send one swarm to Langfuse: every session of its launches in the\n            \
                     swarm's Langfuse session, then its summary trace (also sent when\n            \
-                    a swarm closes). `langfuse web -s <swarm id>` opens it.\n\n\
+                    a swarm closes). `langfuse web -s <swarm id>` opens it.\n  \
+          export-project <n> [--hub owner/repo] [--dry-run]\n            \
+                    Send one work item of a Project to Langfuse: every session its\n            \
+                    steps started in the item's Langfuse session (<hub>#<n>), then\n            \
+                    its summary trace (also sent when a build or a fix is delivered).\n\n\
         Options:\n  \
           --session <id>   Target a session (e.g. claude:s1, or a swarm id)\n  \
           --trace <id>     Target a trace ID\n  \
@@ -200,6 +206,102 @@ fn run_traces(args: &[String], lf: Option<&crate::config::ResolvedLangfuse>) -> 
         );
     }
 
+    Ok(())
+}
+
+/// `langfuse export-project <n> [--hub owner/repo] [--dry-run]`:
+/// `tracing::langfuse::export_project`.
+fn run_export_project(
+    args: &[String],
+    tracing_cfg: &crate::config::TracingConfig,
+) -> Result<(), String> {
+    use crate::tracing::langfuse::{ExporterConfig, export_project, map};
+    const USAGE: &str =
+        "usage: agent-mux langfuse export-project <issue number> [--hub owner/repo] [--dry-run]";
+    let env_getter = |k: &str| std::env::var(k).ok();
+    let resolved = crate::config::resolve_tracing(Some(tracing_cfg), &env_getter)
+        .or_else(|| {
+            let mut enabled = tracing_cfg.clone();
+            enabled.enabled = Some(true);
+            crate::config::resolve_tracing(Some(&enabled), &env_getter)
+        })
+        .ok_or("could not resolve tracing configuration")?;
+    let Some(lf) = resolved.langfuse.as_ref() else {
+        return Err(
+            "Langfuse is not configured. Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY.".into(),
+        );
+    };
+    let dry_run = args.iter().any(|a| a == "--dry-run");
+    let mut hub = None;
+    let mut number = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--hub" if i + 1 < args.len() => {
+                hub = Some(args[i + 1].clone());
+                i += 2;
+            }
+            a if a.starts_with("--") => i += 1,
+            a => {
+                number = Some(a.to_string());
+                i += 1;
+            }
+        }
+    }
+    let raw = number.ok_or(USAGE)?;
+    let item: u64 = raw
+        .trim_start_matches('#')
+        .parse()
+        .map_err(|_| format!("\"{raw}\" is not an issue number\n{USAGE}"))?;
+    let hub = match hub {
+        Some(h) => h,
+        None => {
+            let dir = std::env::current_dir().map_err(|e| e.to_string())?;
+            crate::project::config::load(&dir)
+                .map(|c| c.hub_repo().slug())
+                .map_err(|e| format!("{e}; or name the hub with --hub owner/repo"))?
+        }
+    };
+    let conn = crate::tracing::store::open_ro(&resolved.db_path)?;
+    let snap = crate::project::store::load(&conn, &hub).ok().flatten();
+    let item_report = crate::tracing::project_report::report(&conn, &hub, item, snap.as_ref())
+        .map_err(|e| e.to_string())?;
+    if item_report.launches.is_empty() {
+        return Err(format!(
+            "no session was recorded for #{item} of {hub}: nothing to send"
+        ));
+    }
+    let mut cfg = ExporterConfig::new(lf);
+    cfg.flush_interval = std::time::Duration::from_millis(200);
+    let report = export_project(
+        &conn,
+        cfg,
+        map::MapCtx::from_settings(&resolved),
+        &item_report,
+        dry_run,
+        std::time::Duration::from_secs(120),
+    )?;
+    println!(
+        "{} #{item}: {} session(s), {} row(s), {} event(s) to {} (Langfuse session {})",
+        if dry_run { "would send" } else { "sent" },
+        report.sessions,
+        report.ops,
+        report.events,
+        lf.host,
+        map::project_session_id(&hub, item)
+    );
+    if dry_run && let Some(first) = &report.first_event {
+        println!("first event: {first}");
+    }
+    if report.dropped > 0 {
+        println!("[!!] {} event(s) were not accepted", report.dropped);
+    }
+    for note in &report.notes {
+        println!("  {note}");
+    }
+    if report.notes.iter().any(|n| n.contains("authentication")) {
+        return Err("Langfuse rejected the credentials".into());
+    }
     Ok(())
 }
 

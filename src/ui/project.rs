@@ -4,7 +4,7 @@
 
 use super::flow::{dim, head, hints, key_style};
 use crate::app::project::{
-    Focus, ITEM_TABS, Modal, ProjectView, Row, Screen, milestone_features, needs_you,
+    Focus, ITEM_TABS, Modal, ProjectView, Row, Screen, TAB_TRACE, milestone_features, needs_you,
 };
 use crate::project::contract::*;
 use crate::project::doctor::Status;
@@ -753,6 +753,10 @@ fn draw_item_screen(f: &mut Frame, area: Rect, v: &ProjectView) {
                 "no pull request is linked",
             )
         }
+        TAB_TRACE => {
+            scroll = 0;
+            trace_tab(v, it.number, screen.cursor)
+        }
         _ => {
             wrap_text = true;
             match &v.thread {
@@ -795,6 +799,81 @@ fn draw_item_screen(f: &mut Frame, area: Rect, v: &ProjectView) {
             focused: true,
         },
     );
+}
+
+/// The Trace tab: the runs of the item's steps, and the sessions of the
+/// selected one.
+fn trace_tab(v: &ProjectView, number: u64, cursor: usize) -> Vec<Line<'static>> {
+    use crate::tracing::cli::fmt_tokens;
+    use crate::tracing::project_report::{run_line, session_line};
+    use crate::tracing::swarm_report::cost_label;
+    let Some(t) = v.trace.as_ref().filter(|t| t.number == number) else {
+        return vec![Line::styled(" reading the trace store…", dim())];
+    };
+    let r = match &t.report {
+        Ok(r) => r,
+        Err(e) => {
+            return vec![Line::styled(
+                format!(" the trace was not read: {e}"),
+                Style::default().fg(Color::Yellow),
+            )];
+        }
+    };
+    let mut lines = vec![
+        Line::styled(
+            format!(
+                " {} session(s) in {} run(s) · {} tok · {}{}",
+                r.launches.len(),
+                t.runs.len(),
+                fmt_tokens(r.tokens),
+                cost_label(r.cost_usd, r.unpriced),
+                if r.items.len() > 1 {
+                    format!(" · with the {} item(s) under it", r.items.len() - 1)
+                } else {
+                    String::new()
+                }
+            ),
+            head(),
+        ),
+        Line::raw(""),
+    ];
+    lines.extend(list_tab(
+        t.runs
+            .iter()
+            .map(|x| {
+                (
+                    run_line(x, t.read_ns),
+                    if x.ended_ns.is_some() {
+                        Style::default()
+                    } else {
+                        Style::default().fg(Color::Green)
+                    },
+                )
+            })
+            .collect(),
+        cursor,
+        "no step of this item has run a session yet (steps from before sessions carried the item's tag are not listed)",
+    ));
+    if let Some(x) = t.runs.get(cursor) {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            format!(
+                " run {}",
+                if x.run.is_empty() {
+                    "?"
+                } else {
+                    x.run.as_str()
+                }
+            ),
+            dim(),
+        ));
+        for at in &x.sessions {
+            if let Some(l) = r.launches.get(*at) {
+                lines.push(Line::raw(format!("   {}", session_line(l, t.read_ns))));
+            }
+        }
+    }
+    lines
 }
 
 /// A dialog over the middle of the screen.
@@ -929,9 +1008,10 @@ fn draw_foot(f: &mut Frame, area: Rect, v: &ProjectView) {
             1 => "open document",
             2 => "open child",
             3 => "open pull request",
+            TAB_TRACE => "open run",
             _ => "",
         };
-        let mut pairs = vec![("←→ 1-5", "tabs")];
+        let mut pairs = vec![("←→ 1-6", "tabs")];
         if !enter.is_empty() {
             pairs.push(("↑↓", "move"));
             pairs.push(("Enter", enter));
@@ -1068,6 +1148,89 @@ mod tests {
         assert!(text.contains("acme/api#12  open (draft)"), "{text}");
         v.item.as_mut().unwrap().tab = 4;
         assert!(screen_text(&v, 150, 30).contains("reading the issue's thread"));
+    }
+
+    #[test]
+    fn the_trace_tab_lists_the_runs_and_the_sessions_of_the_selected_one() {
+        use crate::app::project::ItemTrace;
+        use crate::tracing::project_report::tests::tag;
+        use crate::tracing::project_report::{ItemRef, ProjectReport, StepLaunch, runs};
+        let mut v = view();
+        v.item = Some(crate::app::project::ItemScreen {
+            number: 2,
+            tab: TAB_TRACE,
+            cursor: 0,
+            scroll: 0,
+            back: vec![],
+        });
+        // before the store is read, and when it has nothing for the item
+        assert!(screen_text(&v, 150, 30).contains("reading the trace store"));
+        let report = |launches: Vec<StepLaunch>| ProjectReport {
+            hub: "acme/hub".into(),
+            item: 2,
+            items: vec![ItemRef {
+                number: 2,
+                item_type: Some("Story".into()),
+                title: "ver pedidos".into(),
+            }],
+            tokens: Some(1500),
+            cost_usd: None,
+            unpriced: false,
+            launches,
+        };
+        let trace = |r: ProjectReport| ItemTrace {
+            number: 2,
+            runs: runs(&r),
+            report: Ok(r),
+            read_ns: 2_000_000_000,
+        };
+        v.trace = Some(trace(report(Vec::new())));
+        let text = screen_text(&v, 150, 30);
+        assert!(
+            text.contains("no step of this item has run a session yet"),
+            "{text}"
+        );
+
+        let launch = |id: &str, at: i64, run: &str, label: &str| StepLaunch {
+            launch_id: id.into(),
+            project: tag(2, "build", run, label),
+            provider: "claude".into(),
+            session_key: None,
+            started_ns: at,
+            ended_ns: Some(at + 1_000_000_000),
+            turns: Vec::new(),
+            tools: 4,
+            errors: 0,
+            tokens: Some(500),
+            cost_usd: None,
+            unpriced: false,
+        };
+        v.trace = Some(trace(report(vec![
+            launch("L-1", 0, "run-a", "build"),
+            launch("L-2", 10, "run-a", "build/review"),
+            launch("L-3", 20, "run-b", "build"),
+        ])));
+        let text = screen_text(&v, 150, 30);
+        assert!(text.contains("3 session(s) in 2 run(s)"), "{text}");
+        assert!(text.contains("#2 build"), "{text}");
+        // the first run is selected: its two sessions are below the list
+        assert!(text.contains("run run-a"), "{text}");
+        assert!(text.contains("review · claude"), "{text}");
+        assert!(text.contains("open run"), "{text}");
+        v.item.as_mut().unwrap().cursor = 1;
+        let text = screen_text(&v, 150, 30);
+        assert!(
+            text.contains("run run-b") && !text.contains("review · claude"),
+            "{text}"
+        );
+        // a store that could not be read says so
+        v.trace = Some(ItemTrace {
+            number: 2,
+            report: Err("locked".into()),
+            runs: Vec::new(),
+            read_ns: 0,
+        });
+        assert!(screen_text(&v, 150, 30).contains("the trace was not read: locked"));
     }
 
     #[test]

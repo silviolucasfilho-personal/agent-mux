@@ -31,6 +31,7 @@ Prefer the MCP tool; use the CLI command (`"$AGENT_MUX_BIN" trace …`, add `--j
 | One session's card | `agent_mux_get_session` (`session_key`) | `trace show <session-key> --json` |
 | A session's turns and observations in order | `agent_mux_get_timeline` (`session_key`) | `trace show <trace-id> --json --tree` / `--timeline` |
 | One swarm as one trace: coordinator, workers, sub-agents, decisions, log | `agent_mux_get_swarm` (`swarm`) | `trace swarm <id> --json` (`--tree`, `--timeline`, `--log`) |
+| One work item of a Project as one trace: every session its steps started, grouped into runs | `agent_mux_get_project_item` (`item`, `hub`) | `trace project <n> --json` (`--tree`, `--log`) |
 | Search prompts and outputs | `agent_mux_search_traces` (`query`) | `trace search "<fts5 query>" --json` |
 | Per-skill attribution, errors, latency, cost | `agent_mux_analyze_skills` (`skill`) | `trace skills --json`, `trace skills lint [name]` |
 | Two launches side by side | `agent_mux_compare_runs` (`a`, `b`) | `trace compare <a> <b>` |

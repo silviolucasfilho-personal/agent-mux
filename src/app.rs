@@ -1522,6 +1522,10 @@ pub struct HistoryState {
     pub scroll_offset: usize,
     pub focused_pane: HistoryPane,
     pub all_projects: bool,
+    /// Only the sessions a Project step started (`p`).
+    pub project_only: bool,
+    /// The Project step of a session, by its id: the badge `#412 build`.
+    pub steps: std::collections::HashMap<String, String>,
     pub error: Option<String>,
     pub base_dir: Option<std::path::PathBuf>,
     /// Log-pane interior height, written back by the renderer each frame so
@@ -1541,6 +1545,8 @@ impl HistoryState {
             scroll_offset: 0,
             focused_pane: HistoryPane::SessionsList,
             all_projects: false,
+            project_only: false,
+            steps: std::collections::HashMap::new(),
             error: None,
             base_dir,
             viewport_rows: std::cell::Cell::new(30),
@@ -1583,6 +1589,10 @@ impl HistoryState {
             cur_ref,
             self.all_projects,
         );
+        if self.project_only {
+            self.sessions
+                .retain(|s| self.steps.contains_key(&s.session_id));
+        }
         self.selected_session_idx = 0;
         self.load_selected_log();
     }
@@ -2662,6 +2672,9 @@ pub struct App {
     pub history_sessions: Vec<SessionSummary>,
     pub selected_history: usize,
     pub history_all_projects: bool,
+    /// The Project step of a past session, by its id (`#412 build`), read
+    /// from the trace store when the History list is filled.
+    pub history_steps: std::collections::HashMap<String, String>,
     pub mode: Mode,
     pub should_quit: bool,
     /// Set with `should_quit` by "Restart agent-mux": `main` shuts down as
@@ -2884,6 +2897,8 @@ pub struct App {
     pub last_factory_poll: Option<Instant>,
     /// The Factory screen as it was when it opened an item's run.
     pub(crate) factory_return: Option<Box<factory::FactoryView>>,
+    /// The Project screen a run was opened from, kept to return to.
+    pub(crate) project_return: Option<Box<project::ProjectView>>,
     pub last_factory_needs: Option<Instant>,
     /// Items of cached Projects that wait on the operator.
     pub project_needs: usize,
@@ -2985,6 +3000,7 @@ impl App {
             history_sessions,
             selected_history: 0,
             history_all_projects: false,
+            history_steps: std::collections::HashMap::new(),
             mode: Mode::Main,
             should_quit: false,
             restart_requested: false,
@@ -3089,6 +3105,7 @@ impl App {
             factory_workspace_override: None,
             last_factory_poll: None,
             factory_return: None,
+            project_return: None,
             last_factory_needs: None,
             project_needs: 0,
             project_exe: None,
@@ -3818,9 +3835,28 @@ impl App {
         });
     }
 
+    /// The badge of every session a Project step started, by session id.
+    /// Empty when there is no trace store.
+    pub fn project_step_badges(&self) -> std::collections::HashMap<String, String> {
+        use crate::tracing::project_report;
+        self.trace_db_path
+            .as_deref()
+            .filter(|p| p.is_file())
+            .and_then(|p| crate::tracing::store::open_ro(p).ok())
+            .and_then(|conn| project_report::session_steps(&conn).ok())
+            .map(|steps| {
+                steps
+                    .into_iter()
+                    .map(|(id, p)| (id, project_report::badge(&p)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Takes a rescanned History list, keeping the cursor in range.
     pub fn apply_history_sessions(&mut self, sessions: Vec<history::SessionSummary>) {
         self.history_sessions = sessions;
+        self.history_steps = self.project_step_badges();
         if self.selected_history >= self.history_sessions.len() {
             self.selected_history = self.history_sessions.len().saturating_sub(1);
         }
@@ -6980,7 +7016,9 @@ impl App {
                     .get(self.selected)
                     .map(|s| s.dir.clone())
                     .or_else(|| std::env::current_dir().ok());
-                self.mode = Mode::SessionHistory(HistoryState::new(cur_dir.as_deref()));
+                let mut state = HistoryState::new(cur_dir.as_deref());
+                state.steps = self.project_step_badges();
+                self.mode = Mode::SessionHistory(state);
             }
             Action::HistoryKey => self.handle_history_key(key),
             Action::OpenTraceBrowser => self.open_trace_browser(),
@@ -7478,6 +7516,10 @@ impl App {
             }
             KeyCode::Char('a') | KeyCode::Char('A') => {
                 history.all_projects = !history.all_projects;
+                history.reload_sessions();
+            }
+            KeyCode::Char('p') | KeyCode::Char('P') => {
+                history.project_only = !history.project_only;
                 history.reload_sessions();
             }
             KeyCode::Char('r') | KeyCode::Enter => {
@@ -10443,6 +10485,25 @@ mod history_tests {
             dispatch(&app.mode, &key(KeyCode::Tab), &ctx()),
             Action::HistoryKey
         ));
+    }
+
+    #[test]
+    fn the_history_screen_lists_only_project_steps_on_p() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut app = App::new(vec![], None, tx);
+        // no session carries a step's tag here, so the filter leaves none
+        app.mode = Mode::SessionHistory(HistoryState::new(None));
+        app.handle_key(&key(KeyCode::Char('p')), Instant::now());
+        let Mode::SessionHistory(h) = &app.mode else {
+            panic!("expected the History screen");
+        };
+        assert!(h.project_only);
+        assert!(h.sessions.is_empty());
+        app.handle_key(&key(KeyCode::Char('p')), Instant::now());
+        let Mode::SessionHistory(h) = &app.mode else {
+            panic!("expected the History screen");
+        };
+        assert!(!h.project_only);
     }
 
     #[test]

@@ -152,6 +152,24 @@ pub fn db_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "tracing is disabled; a Project is cached in the trace store".to_string())
 }
 
+/// After a development step: the item's summary trace to Langfuse, when
+/// Langfuse is configured (spec §9.3). Best effort: a failure is a line.
+fn langfuse_summary(hub: &str, item: u64) {
+    let Ok(cfg) = crate::config::load() else {
+        return;
+    };
+    let Some(settings) =
+        crate::config::resolve_tracing(cfg.tracing.as_ref(), &|k| std::env::var(k).ok())
+    else {
+        return;
+    };
+    if let Some(line) =
+        crate::tracing::langfuse::send_project_summary(&settings.db_path, &settings, hub, item)
+    {
+        println!("  {line}");
+    }
+}
+
 /// A read-write connection to the store, created when it is not there.
 pub fn open_store(db: &Path) -> Result<rusqlite::Connection, String> {
     if !db.is_file() {
@@ -758,7 +776,10 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
                     ctx.build_finish(&b, &result, wt.as_ref(), &s)
                 });
                 match done {
-                    Ok(r) => finish_report(&r, &mut touched),
+                    Ok(r) => {
+                        finish_report(&r, &mut touched);
+                        langfuse_summary(&s.hub, item.number);
+                    }
                     // the board already says development: the cache must too
                     Err(e) => failed = Some(e),
                 }
@@ -828,7 +849,10 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
                     ctx.fix_finish(&f, &result, wt.as_ref())
                 });
                 match done {
-                    Ok(r) => finish_report(&r, &mut touched),
+                    Ok(r) => {
+                        finish_report(&r, &mut touched);
+                        langfuse_summary(&s.hub, item.number);
+                    }
                     Err(e) => failed = Some(e),
                 }
                 break;
