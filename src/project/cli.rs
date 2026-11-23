@@ -58,6 +58,14 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
         run the dispatched items, at most N at a time (3), each as `project run <n>`
         under a lease on the hub's remote; --once ends when nothing is left to run
 
+  agent-mux project qa <n> [--only a,b] [--severity P] [--harness H] [--dry-run]
+        run the QA scenarios of a Story, of a Feature's pending Stories, or a Bug's
+        regression test, on an item that is in QA and whose Feature's plan is
+        qa-ready. A session executes them in a temporary worktree at the default
+        branch and fixes nothing. Green: qa-approved and the item moves on. Red: one
+        Bug per failed scenario under the Story, and the item stays in QA. Blocked
+        with no failure: nothing moves
+
   agent-mux project insights [<n>] [--scope progress|tech|daily|brainstorm] [--topic \"…\"] [--harness H] [--dry-run]
         a read-only session reads where the Project stands (or one item and what is
         under it) and says what matters; the answer is shown and kept as a file.
@@ -128,6 +136,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--delivery",
     "--scope",
     "--topic",
+    "--only",
 ];
 
 struct Args {
@@ -389,6 +398,7 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
         Some("cancel") => cmd_cancel(&a),
         Some("fleet") => cmd_fleet(&a),
         Some("insights") => cmd_insights(&a).await,
+        Some("qa") => cmd_qa(&a).await,
         Some("estimate") => cmd_assist(&a, super::assist::Kind::Estimate).await,
         Some("refine") => cmd_assist(&a, super::assist::Kind::Refine).await,
         None | Some("help") | Some("--help") | Some("-h") => {
@@ -1359,6 +1369,171 @@ fn fleet_run(a: &Args, settings: &crate::config::FleetSettings, poll: u64) -> an
             poll.min(2)
         }));
     }
+}
+
+/// `project qa <n> [--only a,b] [--severity P] [--harness H] [--dry-run]`.
+async fn cmd_qa(a: &Args) -> anyhow::Result<()> {
+    use super::qa::{self, QaPlanned, Verdict};
+    let mut e = env(a)?;
+    let n = number(a)?;
+    let harness =
+        harness_of(a.value("--harness"), Harness::Claude).map_err(|x| anyhow::anyhow!(x))?;
+    let only: Option<Vec<u32>> = match a.value("--only") {
+        Some(raw) => Some(
+            raw.split(',')
+                .map(|x| x.trim().parse::<u32>().ok().filter(|v| *v > 0))
+                .collect::<Option<Vec<u32>>>()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("--only takes scenario numbers, as 2 or 1,3: got \"{raw}\"")
+                })?,
+        ),
+        None => None,
+    };
+    let (_, _, default_severity) = qa::settings(&e.cfg);
+    let severity = a
+        .value("--severity")
+        .unwrap_or(&default_severity)
+        .to_string();
+    if !super::contract::PRIORITIES.contains(&severity.as_str()) {
+        anyhow::bail!(
+            "\"{severity}\" is not a severity; one of: {}",
+            super::contract::PRIORITIES.join(", ")
+        );
+    }
+    // a verdict moves the board: it is decided on what GitHub says now
+    e.fresh = Fresh::Refresh;
+    let s = snap(&e)?;
+    let item = s
+        .item(n)
+        .ok_or_else(|| anyhow::anyhow!("issue #{n} is not in the Project"))?
+        .clone();
+    println!("#{n} {}", item.title);
+    let detail =
+        super::github::issue_detail(&e.tools, &e.cfg, n).map_err(|x| anyhow::anyhow!(x))?;
+    let hub_root = steps::hub_root(&e.cfg).map_err(|x| anyhow::anyhow!(x))?;
+    let ctx = steps::Ctx {
+        tools: &e.tools,
+        cfg: &e.cfg,
+        scratch: steps::scratch_dir(&crate::tracing::analysis::default_snapshot_dir()),
+        hub_root: hub_root.clone(),
+    };
+    let job = match ctx
+        .qa_plan(&item, &detail, &s, only.as_deref())
+        .map_err(|x| anyhow::anyhow!("#{n}: {x}"))?
+    {
+        QaPlanned::Nothing(why) => {
+            println!("  {why}");
+            return Ok(());
+        }
+        QaPlanned::Job(j) => j,
+    };
+    // where the code is: the repository of the item, or of the first Story in scope
+    let owner = match item.item_type {
+        Some(ItemType::Feature) => job
+            .targets
+            .first()
+            .and_then(|sc| s.item(sc.story))
+            .unwrap_or(&item),
+        _ => &item,
+    };
+    let repos = super::build::targets(&hub_root, &e.cfg, owner).map_err(|x| anyhow::anyhow!(x))?;
+    let target = repos
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("#{n} names no repository to test"))?;
+    println!(
+        "  next: run {} scenario(s) with the flow {} on {} (run {} of this item)",
+        job.targets.len(),
+        qa::FLOW_QA,
+        harness.as_str(),
+        job.run
+    );
+    for sc in &job.targets {
+        println!(
+            "    {} · Story #{}{}",
+            sc.anchor,
+            sc.story,
+            if sc.criterio.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", sc.criterio)
+            }
+        );
+    }
+    println!(
+        "  where: a temporary worktree of {} ({}) at its default branch; the session fixes nothing",
+        target.dir.display(),
+        target.repo.slug()
+    );
+    if repos.len() > 1 {
+        println!(
+            "  ! the item changes {} repositories: the scenarios run in the first, {}",
+            repos.len(),
+            target.repo.slug()
+        );
+    }
+    println!(
+        "  then: the report on the issue; green moves the item on, red opens a Bug ({severity}) per failed scenario"
+    );
+    if a.flag("--dry-run") {
+        return Ok(());
+    }
+    super::build::check_checkout(target).map_err(|x| anyhow::anyhow!(x))?;
+    let base =
+        crate::factory::deliver::default_branch(&target.dir).map_err(|x| anyhow::anyhow!(x))?;
+    crate::factory::deliver::fetch(&target.dir, &base).map_err(|x| anyhow::anyhow!(x))?;
+    let wt = ctx.scratch.join(format!("qa-{n}-{}", super::now_ns()));
+    std::fs::create_dir_all(&ctx.scratch)?;
+    super::build::git(
+        &target.dir,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            &wt.to_string_lossy(),
+            &format!("origin/{base}"),
+        ],
+    )
+    .map_err(|x| anyhow::anyhow!("the QA worktree was not created: {x}"))?;
+    let head = super::build::git(&wt, &["rev-parse", "--short=7", "HEAD"]).unwrap_or_default();
+    let tag = super::ProjectLaunch {
+        hub: s.hub.clone(),
+        item: n,
+        item_type: item.item_type.map(|t| t.as_str().to_string()),
+        feature: job.feature.filter(|f| *f != n),
+        milestone: item.milestone.clone(),
+        step: "qa".to_string(),
+        attempt: job.run,
+        role: "qa".to_string(),
+        executor: "operator".to_string(),
+        code_repo: Some(target.repo.slug()),
+        ..Default::default()
+    };
+    let ran = run_flow(qa::FLOW_QA, &wt, harness, job.args.clone(), None, tag).await;
+    // the worktree goes whatever happened: what the session changed dies with it
+    let _ = super::build::git(
+        &target.dir,
+        &["worktree", "remove", "--force", &wt.to_string_lossy()],
+    );
+    let result = ran.map_err(|x| {
+        anyhow::anyhow!(
+            "#{n}: the QA session did not finish ({x}): nothing was moved and no Bug was created"
+        )
+    })?;
+    let (report, verdict) = ctx
+        .qa_finish(&job, &result, &s, &severity, head.trim())
+        .map_err(|x| anyhow::anyhow!("#{n}: {x}"))?;
+    for line in &report.lines {
+        println!("  {line}");
+    }
+    if let Err(err) = refresh_touched(&e.conn, &e.tools, &e.cfg, &report.touched) {
+        eprintln!("the cache was not refreshed ({err}); `agent-mux project sync` reads it again");
+    }
+    langfuse_summary(&s.hub, n);
+    println!("  verdict: {}", verdict.as_str());
+    if verdict != Verdict::Pass {
+        anyhow::bail!("#{n}: QA did not pass ({})", verdict.as_str());
+    }
+    Ok(())
 }
 
 /// `project insights [<n>] [--scope S] [--topic T] [--harness H]`.

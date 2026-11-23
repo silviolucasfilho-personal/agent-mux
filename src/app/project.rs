@@ -639,7 +639,10 @@ impl ProjectView {
         let hub_root = self.hub_root();
         if !ctrl
             && let KeyCode::Char(c) = key.code
-            && matches!(c, 'm' | 'M' | 't' | 'R' | 'D' | 'r' | 'E' | 'W' | 'c' | 'a')
+            && matches!(
+                c,
+                'm' | 'M' | 't' | 'R' | 'D' | 'r' | 'E' | 'W' | 'c' | 'a' | 'Q'
+            )
         {
             return self.verb_key(c).unwrap_or(Outcome::None);
         }
@@ -1030,6 +1033,7 @@ impl ProjectView {
                     | 'c'
                     | 'a'
                     | 'I'
+                    | 'Q'
             )
         {
             return None;
@@ -1106,6 +1110,50 @@ impl ProjectView {
                     return need("talk about");
                 };
                 return Some(Outcome::Chat(it.number));
+            }
+            'Q' => {
+                use crate::project::qa::{self, Gate};
+                let Some(it) = target else {
+                    return need("run QA on");
+                };
+                let Some(snap) = &self.snap else {
+                    return Some(Outcome::None);
+                };
+                // the gate, from the cache; the command decides on what GitHub says
+                let feature = snap
+                    .ancestor(it.number, ItemType::Feature)
+                    .map(|f| f.labels.clone());
+                let gate = qa::gate(
+                    it.item_type,
+                    &it.labels,
+                    if it.item_type == Some(ItemType::Bug) {
+                        None
+                    } else {
+                        Some(feature.as_deref().unwrap_or(&[]))
+                    },
+                    it.stage.as_deref(),
+                );
+                match gate {
+                    Gate::Refused { message, .. } | Gate::Nothing(message) => {
+                        return Some(Outcome::Notice(format!("#{}: {message}", it.number)));
+                    }
+                    Gate::Run => {}
+                }
+                let n = it.number;
+                self.modal = Some(Modal::Confirm {
+                    lines: vec![
+                        format!("Run QA on #{n}?"),
+                        "A session on Claude Code executes the scenarios of the QA plan (a Bug's regression test) in a temporary worktree at the default branch. It fixes nothing.".into(),
+                        "Green: `spec-wave:qa-approved`, and the item moves to Homologação (a Bug to Deploy); the Feature follows when every Story passed.".into(),
+                        "Red: one Bug per failed scenario is created under the Story, with its bug.md on a pull request, and the item stays in QA.".into(),
+                        "Blocked with no failure: only the report is posted. It takes minutes.".into(),
+                    ],
+                    op: Op::Process {
+                        number: n,
+                        args: vec!["qa".into(), n.to_string()],
+                        what: "QA".into(),
+                    },
+                });
             }
             'I' => {
                 use crate::project::insights::{self, Scope};
@@ -3511,6 +3559,56 @@ mod tests {
         };
         assert_eq!(options[0], "show the last tech");
         assert_eq!(v.handle_key(&key(KeyCode::Enter)), Outcome::OpenDoc(file));
+    }
+
+    #[test]
+    fn qa_is_offered_only_where_its_gate_lets_it_run() {
+        let mut v = view();
+        // put a Story in QA under a Feature whose plan is ready
+        let snap = v.snap.as_mut().unwrap();
+        let story = snap
+            .items
+            .iter()
+            .find(|i| i.item_type == Some(ItemType::Story) && i.parent.is_some())
+            .map(|i| (i.number, i.parent.unwrap()))
+            .expect("the fixture has a Story under a Feature");
+        for i in snap.items.iter_mut() {
+            if i.number == story.0 {
+                i.stage = Some(STAGE_QA.to_string());
+            }
+        }
+        v.item = Some(ItemScreen {
+            number: story.0,
+            tab: 0,
+            cursor: 0,
+            scroll: 0,
+            back: vec![],
+        });
+        // the plan is not qa-ready: the key says why, and asks nothing
+        assert!(matches!(
+            v.handle_key(&key(KeyCode::Char('Q'))),
+            Outcome::Notice(m) if m.contains(LABEL_QA_READY)
+        ));
+        assert!(v.modal.is_none());
+        for i in v.snap.as_mut().unwrap().items.iter_mut() {
+            if i.number == story.1 {
+                i.labels.push(LABEL_QA_READY.to_string());
+            }
+        }
+        v.handle_key(&key(KeyCode::Char('Q')));
+        let Some(Modal::Confirm { lines, op }) = &v.modal else {
+            panic!("no confirmation: {:?}", v.modal)
+        };
+        assert!(
+            lines[0].contains(&format!("Run QA on #{}", story.0)),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("one Bug per failed scenario"))
+        );
+        assert!(matches!(op, Op::Process { args, .. } if args == &["qa", &story.0.to_string()]));
     }
 
     #[test]

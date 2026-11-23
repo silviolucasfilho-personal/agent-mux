@@ -551,6 +551,10 @@ pub const BUILTIN: &[(&str, &str)] = &[
         "tech-lead",
         include_str!("../../agents/builtin/tech-lead.toml"),
     ),
+    (
+        "qa-analyst",
+        include_str!("../../agents/builtin/qa-analyst.toml"),
+    ),
     ("critic", include_str!("../../agents/builtin/critic.toml")),
 ];
 

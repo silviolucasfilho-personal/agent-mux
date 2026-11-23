@@ -1,0 +1,35 @@
+# A step of the Projects flow (docs/project.md): one session executes the
+# QA scenarios of a work item and answers a verdict for each. It runs in a
+# temporary worktree at the default branch's tip. It fixes nothing and
+# writes nothing to GitHub: agent-mux posts the report, opens a Bug for a
+# failed scenario and moves the board.
+[workflow]
+name = "project-qa"
+description = "Execute the QA scenarios of a Story, a Feature or a Bug and answer pass, fail or blocked for each, with the raw evidence."
+when_to_use = "Started by `agent-mux project qa` on an item that is in QA."
+output = "work"
+default_isolation = "none"
+
+[args.context]
+description = "The QA context: the item, the rules, the setup, and the scenarios in order."
+required = true
+[args.scenarios]
+description = "The positional numbers of the scenarios to execute."
+required = true
+
+[schemas.scenario]
+fields.cenario = { type = "number", required = true }
+fields.verdict = { type = "string", enum = ["pass", "fail", "blocked"], required = true }
+fields.evidencia = { type = "string" }
+fields.blockedReason = { type = "string" }
+[schemas.verdicts]
+fields.scenarios = { type = "array", items = "scenario", required = true }
+
+[[steps]]
+id = "work"
+phase = "Work"
+agent = "qa-analyst"
+skill = "wf-project-qa"
+isolation = "none"
+args = { context = "{args.context}", scenarios = "{args.scenarios}" }
+result = "verdicts"

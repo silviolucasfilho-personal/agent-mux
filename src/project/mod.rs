@@ -36,6 +36,8 @@ pub mod merge;
 pub mod next;
 pub mod ops;
 pub mod order;
+pub mod qa;
+pub mod qa_plan;
 pub mod run;
 pub mod snapshot;
 pub mod stack;

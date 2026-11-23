@@ -44,6 +44,7 @@ const PLAN_JSON: &str = r##"{"document":"# Estratégia Técnica\n# Detalhamento 
 const FINDINGS_JSON: &str =
     r#"{"findings":[{"severity":"menor","anchor":"Backend","text":"ordem das seções"}]}"#;
 
+const VERDICTS_JSON: &str = r#"{"scenarios":[{"cenario":1,"verdict":"pass","evidencia":"GET /pedidos -> 200, 20 itens"},{"cenario":2,"verdict":"blocked","blockedReason":"ambiente","evidencia":"banco fora do ar"}]}"#;
 const INSIGHT_JSON: &str =
     r#"{"text":"Uma Story pronta, nada bloqueado.","actions":["Construir #12"]}"#;
 const ESTIMATE_JSON: &str =
@@ -90,6 +91,9 @@ case "$AGENT_MUX_WORKFLOW_STEP" in
 esac
 if grep -q '"findings"' "$AGENT_MUX_WORKFLOW_CONTEXT"; then
   emit '{findings}'
+elif grep -q '"blockedReason"' "$AGENT_MUX_WORKFLOW_CONTEXT"; then
+  pwd > "$r/qa.cwd"
+  emit '{verdicts}'
 elif grep -q '"digest"' "$AGENT_MUX_WORKFLOW_CONTEXT"; then
   emit '{insight}'
 elif grep -q '"rationale"' "$AGENT_MUX_WORKFLOW_CONTEXT"; then
@@ -105,6 +109,7 @@ exit 0
         findings = FINDINGS_JSON,
         estimate = ESTIMATE_JSON,
         insight = INSIGHT_JSON,
+        verdicts = VERDICTS_JSON,
         refined = REFINED_JSON,
         plan = PLAN_JSON,
         work = WORK_JSON,
@@ -874,6 +879,30 @@ async fn an_insight_reads_the_digest_and_writes_nothing() {
             .unwrap()
             .contains("isolation = \"none\"")
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_qa_flow_answers_a_verdict_per_scenario() {
+    use agent_mux::project::qa;
+    let mut f = fixture();
+    let result = run_flow(
+        &mut f,
+        qa::FLOW_QA,
+        serde_json::json!({"context": "# Contexto de QA — Story #12", "scenarios": [1, 2]}),
+    )
+    .await;
+    // the answer passes the same rules a real session's must
+    let verdicts = qa::validate_results(&result, &[1, 2]).unwrap();
+    assert_eq!(verdicts[0].verdict, qa::Verdict::Pass);
+    assert_eq!(verdicts[1].blocked_reason.as_deref(), Some("ambiente"));
+    assert_eq!(qa::aggregate(&verdicts), qa::Verdict::Blocked);
+    // and one that leaves a scenario out does not
+    assert!(qa::validate_results(&result, &[1, 2, 3]).is_err());
+    assert!(
+        f.bin.join("calls").join("qa.cwd").is_file(),
+        "the session did not run"
+    );
+    assert!(std::fs::read_to_string(f.root.join("gh-calls")).is_err());
 }
 
 #[test]
