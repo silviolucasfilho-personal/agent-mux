@@ -80,7 +80,7 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
         and every line tools read; --yes replaces the issue's description with the
         proposal that is waiting, unless the description changed since
 
-  agent-mux project run <n> [--step spec|plan|bug|critique|validate|build|fix|fix-pr] [--harness H] [--critic H] [--dry-run] [--apply] [--ignore-dependencies] [--keep-drafts] [--delivery pr-stack|agent]
+  agent-mux project run <n> [--step spec|plan|bug|critique|validate|build|fix|fix-pr|qa-plan] [--harness H] [--critic H] [--dry-run] [--apply] [--ignore-dependencies] [--keep-drafts] [--delivery pr-stack|agent]
         run the item's next document step: a read-only session writes the document,
         agent-mux publishes it by pull request and comments on the issue; a plan and
         a bug document are then audited by a second session; a decomposition is
@@ -96,6 +96,10 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
         the last Story is delivered the Feature's pull requests are marked ready
         together (--keep-drafts leaves them). A stack that stops resumes when the
         Feature is run again
+        --step qa-plan on a Feature: a session writes qa-plan.md (scenarios per
+        Story) from the merged spec and plan, agent-mux validates it and publishes it
+        by pull request, and a second session audits it; a clean audit adds
+        spec-wave:qa-ready. A plan that is already there is audited as it is
         --step fix-pr on a Story or Bug with an open pull request: a session fixes
         what the open review comments ask for on the pull request's branch, a
         second one reviews the fixes, and agent-mux pushes them, answers each
@@ -1883,8 +1887,9 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("issue #{n} is not in the Project"))?
         .clone();
     let fix_pr = matches!(a.value("--step"), Some("fix-pr" | "fix_pr" | "fixpr"));
+    let qa_plan = matches!(a.value("--step"), Some("qa-plan" | "qa_plan" | "qaplan"));
     let forced = match a.value("--step") {
-        Some(_) if fix_pr => None,
+        Some(_) if fix_pr || qa_plan => None,
         Some(step) => {
             Some(steps::forced_action(step, item.item_type).map_err(|x| anyhow::anyhow!(x))?)
         }
@@ -1918,12 +1923,15 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
         ..Default::default()
     };
     // development is its own step: a Story, a triaged Bug, or `--step build`
-    let develop = match forced {
-        Some(f) => f == next::Action::Implement,
-        None => super::build::decision(&item, &s, false).is_some(),
-    };
+    let develop = !qa_plan
+        && match forced {
+            Some(f) => f == next::Action::Implement,
+            None => super::build::decision(&item, &s, false).is_some(),
+        };
     let mut planned = if fix_pr {
         ctx.fix_plan(&item, &detail, &s)
+    } else if qa_plan {
+        ctx.qa_plan_step(&item, &detail, &s)
     } else if develop {
         ctx.build_plan(&item, &detail, &s, a.flag("--ignore-dependencies"))
     } else {

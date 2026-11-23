@@ -1139,7 +1139,7 @@ mod tests {
         assert_eq!(count(Kind::Settings), 1);
         assert_eq!(
             count(Kind::Skill),
-            86,
+            88,
             "Heimdall, the workflow planner, the swarm coordinator, the Project skill and thirty-six step skills"
         );
         assert_eq!(count(Kind::LoopPattern), 1);
@@ -1231,7 +1231,7 @@ mod tests {
         assert_eq!(docs.source, Source::User);
         assert!(docs.valid(), "{:?}", docs.problems);
         assert!(cat.find("auditor").unwrap().valid());
-        assert_eq!(cat.by_kind(Kind::Skill).count(), 88);
+        assert_eq!(cat.by_kind(Kind::Skill).count(), 90);
         let notes = cat.find("skills/my-notes/SKILL.md").unwrap();
         assert!(notes.valid(), "{:?}", notes.problems);
         assert_eq!(

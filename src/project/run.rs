@@ -37,6 +37,7 @@ pub const FLOW_SPEC: &str = "project-spec";
 pub const FLOW_PLAN: &str = "project-plan";
 pub const FLOW_BUG: &str = "project-bug";
 pub const FLOW_CRITIQUE: &str = "project-critique";
+pub const FLOW_QA_PLAN: &str = "project-qa-plan";
 pub const FLOW_DECOMPOSE: &str = "project-decompose";
 pub const FLOW_DECOMPOSE_RFC: &str = "project-decompose-rfc";
 
@@ -76,6 +77,9 @@ pub enum Shape {
     Stories,
     /// `{tasks}`: an RFC's draft.
     Tasks,
+    /// `{document}`: a QA plan's scenarios, rendered by Rust as
+    /// qa-plan.md with its marker and positional numbers.
+    QaPlan,
 }
 
 /// A critique to run.
@@ -294,6 +298,14 @@ impl<'a> Ctx<'a> {
                 .unwrap_or_default())
         };
         let (spec, plan, tech_context, tech_override_text) = match kind {
+            // the QA plan is audited against the Feature's spec and plan
+            Kind::Qa => (
+                spec_of()?,
+                self.base_file(&doc_path(t, &item.title, "plan"))?
+                    .unwrap_or_default(),
+                String::new(),
+                String::new(),
+            ),
             Kind::Plan => (
                 spec_of()?,
                 String::new(),
@@ -509,6 +521,128 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Plans the `qa-plan` step of a Feature (spec-wave's
+    /// `generate-qa-plan`): a session writes the plan from the merged spec
+    /// and plan and the Feature's real Stories; a plan that is already
+    /// there, merged or still on its pull request, is validated and
+    /// audited as it is, never generated again, so a person's edits stay.
+    /// `Err` is a refusal with its reason; nothing was written.
+    pub fn qa_plan_step(
+        &self,
+        item: &Item,
+        detail: &Detail,
+        snap: &super::Snapshot,
+    ) -> Result<Planned, String> {
+        use super::qa_plan;
+        let n = item.number;
+        match item.item_type {
+            Some(ItemType::Feature) => {}
+            Some(ItemType::Story) => {
+                return Err(format!(
+                    "the QA plan is a Feature's, not a Story's: run it on the Feature above #{n}{}. To execute this Story's scenarios: `agent-mux project qa {n}`",
+                    snap.ancestor(n, ItemType::Feature)
+                        .filter(|f| f.number != n)
+                        .map(|f| format!(" (#{})", f.number))
+                        .unwrap_or_default()
+                ));
+            }
+            Some(ItemType::Bug) => {
+                return Err(format!(
+                    "a Bug has no QA plan: its QA is the \"Teste de Regressão\" section of its bug.md. Run `agent-mux project qa {n}`"
+                ));
+            }
+            other => {
+                return Err(format!(
+                    "a QA plan is written for a Feature, and #{n} is {}",
+                    other.map_or("an issue with no type", ItemType::as_str)
+                ));
+            }
+        }
+        for label in [LABEL_NEEDS_HUMAN, LABEL_CRITIQUE_FAILED] {
+            if item.has_label(label) {
+                return Err(format!(
+                    "`{label}` is on #{n}: correct the document its 🔎 comment names and remove the label first"
+                ));
+            }
+        }
+        let dir = doc_dir(ItemType::Feature, &item.title);
+        let need = |file: &str| -> Result<String, String> {
+            let p = format!("{dir}/{file}");
+            self.base_file(&p)?.ok_or_else(|| {
+                format!("`{p}` is not on the default branch: the QA plan comes from the acceptance criteria of the merged spec, and from the plan")
+            })
+        };
+        let (spec, plan) = (need("spec.md")?, need("plan.md")?);
+        let stories: Vec<&Item> = snap
+            .children_of(n)
+            .into_iter()
+            .filter(|c| c.item_type == Some(ItemType::Story))
+            .collect();
+        if stories.is_empty() {
+            return Err(format!(
+                "Feature #{n} has no Story: decompose it first, the plan has scenarios per Story"
+            ));
+        }
+        // a Story closed as not planned was dropped in a re-scope: the
+        // reason is GitHub's, read now, since the snapshot does not keep it
+        let mut refs: Vec<qa_plan::StoryRef> = Vec::new();
+        for s in &stories {
+            let discarded = !s.open
+                && super::github::close_reason(self.tools, self.cfg, s.number)?
+                    .eq_ignore_ascii_case("NOT_PLANNED");
+            refs.push(qa_plan::StoryRef {
+                number: s.number,
+                title: s.name().to_string(),
+                discarded,
+            });
+        }
+        let path = format!("{dir}/qa-plan.md");
+        // the plan as it is now: on the default branch, or on its branch
+        let existing = match self.base_file(&path)? {
+            Some(c) => Some(c),
+            None => {
+                deliver::read_branch_file(&self.hub_root, &artifact_branch(n, "qa-plan"), &path)?
+            }
+        };
+        if let Some(content) = existing {
+            let parsed = qa_plan::parse(&content)
+                .map_err(|e| format!("{e} Corrija `{path}`, ou apague-o para gerar outro."))?;
+            let errors = qa_plan::validate(&parsed, &refs, &content);
+            if !errors.is_empty() {
+                return Err(format!(
+                    "`{path}` does not pass the validation, so it was not audited:\n  - {}",
+                    errors.join("\n  - ")
+                ));
+            }
+            return self.critique_job(item, detail, Kind::Qa, &content);
+        }
+        let mut listed = Vec::new();
+        for s in stories
+            .iter()
+            .filter(|s| refs.iter().any(|r| r.number == s.number && !r.discarded))
+        {
+            let d = super::github::issue_detail(self.tools, self.cfg, s.number)?;
+            listed.push(json!({ "number": s.number, "title": d.title, "body": d.body }));
+        }
+        Ok(Planned::Generate(Generate {
+            doc: "qa-plan",
+            flow: FLOW_QA_PLAN,
+            args: json!({
+                "payload": serde_json::to_string_pretty(&json!({
+                    "feature": { "number": n, "title": detail.title },
+                    "stories": listed,
+                    "spec": spec,
+                    "plan": plan,
+                })).unwrap_or_default(),
+                "workspace": self.workspace_arg(),
+            }),
+            path,
+            next: Some("qa"),
+            then_critique: Some(Kind::Qa),
+            shape: Shape::QaPlan,
+        }))
+    }
+
     /// Publishes the document a session answered, says so on the issue,
     /// and plans the critique that follows, when one does.
     pub fn finish_generate(
@@ -525,6 +659,55 @@ impl<'a> Ctx<'a> {
                     .and_then(Value::as_str)
                     .ok_or("the session answered no `document`")?;
                 docs::unwrap_generated(raw)
+            }
+            // the plan's file is rendered here: its marker and its numbers
+            // are Rust's, and it is checked before anything is published
+            Shape::QaPlan => {
+                use super::qa_plan;
+                let raw = result
+                    .get("document")
+                    .and_then(Value::as_str)
+                    .ok_or("the session answered no `document`")?;
+                let answered = qa_plan::parse_answer(&docs::unwrap_generated(raw))
+                    .map_err(|e| format!("the session answered a plan outside the format: {e}"))?;
+                let file = qa_plan::render(
+                    &detail.title,
+                    item.number,
+                    &answered
+                        .scenarios
+                        .iter()
+                        .map(|s| (s.story, s.body.clone()))
+                        .collect::<Vec<_>>(),
+                );
+                let stories: Vec<qa_plan::StoryRef> = g
+                    .args
+                    .get("payload")
+                    .and_then(Value::as_str)
+                    .and_then(|p| serde_json::from_str::<Value>(p).ok())
+                    .and_then(|p| p.get("stories").and_then(Value::as_array).cloned())
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|s| {
+                        Some(qa_plan::StoryRef {
+                            number: s.get("number")?.as_u64()?,
+                            title: s
+                                .get("title")
+                                .and_then(Value::as_str)
+                                .map(|t| strip_tag(t).to_string())
+                                .unwrap_or_default(),
+                            discarded: false,
+                        })
+                    })
+                    .collect();
+                let parsed = qa_plan::parse(&file)?;
+                let errors = qa_plan::validate(&parsed, &stories, &file);
+                if !errors.is_empty() {
+                    return Err(format!(
+                        "the plan the session answered does not pass the validation; nothing was published:\n  - {}",
+                        errors.join("\n  - ")
+                    ));
+                }
+                file
             }
             // the draft's file is rendered here, never written by a model
             Shape::Stories | Shape::Tasks => {
@@ -593,6 +776,9 @@ impl<'a> Ctx<'a> {
             }
             "decomposition" => {
                 "Este é um **rascunho**: nenhuma issue foi criada. Revise e edite as Stories e Tasks **no Pull Request**, faça o merge e então aplique a decomposição."
+            }
+            "qa-plan" => {
+                "Revise os cenários **no Pull Request** (edite o que precisar) e faça o merge. A crítica adversarial roda em seguida: só ela libera o plano para execução."
             }
             _ => {
                 "Revise **Causa Raiz** e **Teste de Regressão** **no Pull Request** e faça o merge. Depois, valide o bug."
@@ -676,6 +862,10 @@ impl<'a> Ctx<'a> {
                 let _ =
                     write::remove_label(self.tools, self.cfg, item.number, LABEL_DECOMPOSE_READY);
             }
+            // a plan that fails its audit is not released for execution
+            if job.kind == Kind::Qa && item.has_label(LABEL_QA_READY) {
+                let _ = write::remove_label(self.tools, self.cfg, item.number, LABEL_QA_READY);
+            }
             r.lines.push(format!(
                 "! the critique of {} found {grave} grave finding(s) (attempt {}/{}): `{LABEL_CRITIQUE_FAILED}` is on #{}",
                 job.kind.document(),
@@ -692,6 +882,42 @@ impl<'a> Ctx<'a> {
                 job.kind.document(),
                 findings.len()
             ));
+            if job.kind == Kind::Qa {
+                // the gate of QA: a green verdict moves the stage by itself
+                write::add_label(self.tools, self.cfg, item.number, LABEL_QA_READY)?;
+                let scenarios = job
+                    .args
+                    .get("document")
+                    .and_then(Value::as_str)
+                    .and_then(|d| super::qa_plan::parse(d).ok())
+                    .map(|p| p.scenarios)
+                    .unwrap_or_default();
+                let mut per: Vec<(u64, usize)> = Vec::new();
+                for s in &scenarios {
+                    match per.iter_mut().find(|(n, _)| *n == s.story) {
+                        Some((_, k)) => *k += 1,
+                        None => per.push((s.story, 1)),
+                    }
+                }
+                let summary = per
+                    .iter()
+                    .map(|(story, k)| format!("- Story #{story}: {k} cenário(s)"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let n = item.number;
+                let _ = write::comment(
+                    self.tools,
+                    self.cfg,
+                    n,
+                    &format!(
+                        "🧪 **Plano de QA pronto para revisão humana** ({} cenário(s)).\n\n{summary}\n\nA crítica adversarial não encontrou problemas graves e a label `{LABEL_QA_READY}` foi aplicada — **ela é o portão humano**: o veredito verde da execução avança a Etapa sozinho, então revise os cenários ANTES de rodar. O `qa` só executa o plano que está na branch padrão: faça o merge do Pull Request do plano.\n\nDepois execute:\n```\nagent-mux project qa {n} --dry-run\nagent-mux project qa {n}\n```\nPara uma nova crítica depois de editar, rode `agent-mux project run {n} --step qa-plan` — o arquivo é criticado como está, sem ser regerado. Para gerar outro do zero, apague o arquivo.",
+                        scenarios.len()
+                    ),
+                );
+                r.lines.push(format!(
+                    "`{LABEL_QA_READY}` is on #{n}: review the plan, merge its pull request, then `agent-mux project qa`"
+                ));
+            }
             if job.kind == Kind::Stories {
                 // the draft passed: it waits for a person, who applies it
                 write::add_label(self.tools, self.cfg, item.number, LABEL_DECOMPOSE_READY)?;
@@ -805,7 +1031,9 @@ mod tests {
     use crate::project::ops::tests::fake_gh;
     use std::process::Command;
 
-    const PR_ARM: &str = r#"  "pr create"*) echo 'https://github.com/acme/hub/pull/7' ;;"#;
+    const PR_ARM: &str = r#"  "pr create"*) echo 'https://github.com/acme/hub/pull/7' ;;
+  "issue view 16 "*) echo '{"stateReason":"NOT_PLANNED"}' ;;
+  "issue view"*) echo '{"title":"[STORY] uma story","body":"Como cliente","url":"u","comments":[]}' ;;"#;
 
     struct Fx {
         _dir: tempfile::TempDir,
@@ -944,6 +1172,229 @@ mod tests {
         assert!(calls[1].contains("🔀 Pull Request: #7"));
         // no label was applied: a trigger label would start an Action
         assert!(!calls.iter().any(|c| c.starts_with("issue edit")));
+    }
+
+    fn qa_snap(items: Vec<Item>) -> crate::project::Snapshot {
+        crate::project::Snapshot {
+            hub: "acme/hub".into(),
+            items,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_qa_plan_is_written_checked_published_audited_and_released() {
+        let f = fx("");
+        let feature = item(1, "[FEATURE] Pedidos", &["[FEATURE]"]);
+        let mut s12 = item(12, "[STORY] ver pedidos", &["[STORY]"]);
+        s12.parent = Some(1);
+        let mut s15 = item(15, "[STORY] filtrar", &["[STORY]"]);
+        s15.parent = Some(1);
+        let snap = qa_snap(vec![feature.clone(), s12.clone(), s15]);
+        let d = detail("corpo");
+        // only a Feature has a plan, and each refusal says where to go
+        let e = f.ctx().qa_plan_step(&s12, &d, &snap).unwrap_err();
+        assert!(
+            e.contains("Feature above #12 (#1)") && e.contains("project qa 12"),
+            "{e}"
+        );
+        let bug = item(9, "[BUG] x", &["[BUG]"]);
+        let e = f.ctx().qa_plan_step(&bug, &d, &snap).unwrap_err();
+        assert!(e.contains("Teste de Regressão"), "{e}");
+        let mut held = feature.clone();
+        held.labels.push(LABEL_NEEDS_HUMAN.to_string());
+        assert!(
+            f.ctx()
+                .qa_plan_step(&held, &d, &snap)
+                .unwrap_err()
+                .contains(LABEL_NEEDS_HUMAN)
+        );
+        // it is written from the merged spec and plan
+        let e = f.ctx().qa_plan_step(&feature, &d, &snap).unwrap_err();
+        assert!(e.contains("spec.md` is not on the default branch"), "{e}");
+        f.merge("docs/features/pedidos/spec.md", SPEC);
+        f.merge("docs/features/pedidos/plan.md", PLAN);
+        // and for the Feature's Stories
+        let e = f
+            .ctx()
+            .qa_plan_step(&feature, &d, &qa_snap(vec![feature.clone()]))
+            .unwrap_err();
+        assert!(e.contains("has no Story"), "{e}");
+        assert!(
+            f.calls().is_empty(),
+            "a refusal asked GitHub nothing: {:?}",
+            f.calls()
+        );
+
+        let Planned::Generate(g) = f.ctx().qa_plan_step(&feature, &d, &snap).unwrap() else {
+            panic!("not a generation")
+        };
+        assert_eq!(
+            (g.doc, g.flow, g.shape),
+            ("qa-plan", FLOW_QA_PLAN, Shape::QaPlan)
+        );
+        assert_eq!(g.path, "docs/features/pedidos/qa-plan.md");
+        assert_eq!(g.then_critique, Some(Kind::Qa));
+        let payload: Value = serde_json::from_str(g.args["payload"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["feature"]["number"], 1);
+        assert_eq!(payload["spec"], SPEC);
+        assert_eq!(payload["stories"][1]["number"], 15);
+        // planning read the two Stories and wrote nothing
+        assert!(
+            f.calls().iter().all(|c| c.starts_with("issue view")),
+            "{:?}",
+            f.calls()
+        );
+
+        // a plan that leaves a Story out is not published
+        let before = f.calls().len();
+        let thin = "# Plano de QA\n\n## Cenário 1 — Story #12\n**Critério:** lista\n**Esperado:** 20 pedidos\n";
+        let e = f
+            .ctx()
+            .finish_generate(&feature, &d, &g, &json!({"document": thin}))
+            .unwrap_err();
+        assert!(
+            e.contains("A Story #15") && e.contains("nothing was published"),
+            "{e}"
+        );
+        // nor one outside the format
+        let e = f
+            .ctx()
+            .finish_generate(
+                &feature,
+                &d,
+                &g,
+                &json!({"document": "# Plano\nsem cenários\n"}),
+            )
+            .unwrap_err();
+        assert!(e.contains("outside the format"), "{e}");
+        assert_eq!(f.calls().len(), before);
+
+        // a sound one is rendered by Rust, published, and its audit planned
+        let answer = "# Plano de QA\n\n## Cenário 4 — Story #12\n**Critério:** lista\n**Esperado:** 20 pedidos\n\n## Cenário 7 — Story #15\n**Critério:** filtro\n**Esperado:** só o mês\n";
+        let (r, follow) = f
+            .ctx()
+            .finish_generate(&feature, &d, &g, &json!({"document": answer}))
+            .unwrap();
+        assert!(
+            r.lines[0].contains("qa-plan.md published on spec-wave/1-qa-plan"),
+            "{:?}",
+            r.lines
+        );
+        let origin = f.root.join("origin.git");
+        let out = Command::new("git")
+            .args([
+                "show",
+                "spec-wave/1-qa-plan:docs/features/pedidos/qa-plan.md",
+            ])
+            .current_dir(&origin)
+            .output()
+            .unwrap();
+        let file = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            file.starts_with("# Plano de QA — [FEATURE] Pedidos\n<!-- spec-wave:qa-plan v1 issue=1 -->\n\n## Cenário 1 — Story #12\n"),
+            "{file}"
+        );
+        assert!(file.contains("## Cenário 2 — Story #15"), "{file}");
+        let Some(Planned::Critique(job)) = follow else {
+            panic!("no audit followed")
+        };
+        assert_eq!(job.kind, Kind::Qa);
+        assert_eq!(job.args["kind"], "qa");
+        assert_eq!(job.args["document"], file);
+        assert_eq!(job.args["spec"], SPEC);
+        assert_eq!(job.args["plan"], PLAN);
+
+        // run again while the pull request is open: the file on its branch
+        // is audited as it is, with no session writing it again
+        let Planned::Critique(again) = f.ctx().qa_plan_step(&feature, &d, &snap).unwrap() else {
+            panic!("the plan on its branch was not audited")
+        };
+        assert_eq!(again.args["document"], file);
+
+        // a grave finding takes the release back
+        let mut released = feature.clone();
+        released.labels.push(LABEL_QA_READY.to_string());
+        let before = f.calls().len();
+        let grave = json!({"findings": [{"severity": "grave", "anchor": "Cenário 2", "text": "passaria sem a implementação"}]});
+        f.ctx()
+            .finish_critique(&released, &job, &grave, "")
+            .unwrap();
+        let calls = f.calls()[before..].to_vec();
+        assert!(
+            calls[0].contains("kind=qa attempt=1 verdict=grave"),
+            "{calls:?}"
+        );
+        assert!(calls[0].contains("o plano **não foi liberado**"));
+        assert_eq!(
+            calls[1],
+            "issue edit 1 -R acme/hub --add-label spec-wave:critique-failed "
+        );
+        assert_eq!(
+            calls[2],
+            "issue edit 1 -R acme/hub --remove-label spec-wave:qa-ready "
+        );
+        // a clean audit releases the plan and says what it holds
+        let before = f.calls().len();
+        let r = f
+            .ctx()
+            .finish_critique(&feature, &job, &json!({"findings": []}), "")
+            .unwrap();
+        let calls = f.calls()[before..].to_vec();
+        assert_eq!(
+            calls[1],
+            "issue edit 1 -R acme/hub --add-label spec-wave:qa-ready "
+        );
+        assert!(
+            calls[2].contains("Plano de QA pronto para revisão humana** (2 cenário(s))"),
+            "{calls:?}"
+        );
+        assert!(calls[2].contains("- Story #12: 1 cenário(s)"));
+        assert!(
+            r.lines
+                .last()
+                .unwrap()
+                .contains("spec-wave:qa-ready` is on #1")
+        );
+    }
+
+    #[test]
+    fn a_qa_plan_that_is_there_is_checked_before_it_is_audited() {
+        let f = fx("");
+        let feature = item(1, "[FEATURE] Pedidos", &["[FEATURE]"]);
+        let mut s12 = item(12, "[STORY] ver pedidos", &["[STORY]"]);
+        s12.parent = Some(1);
+        let mut gone = item(16, "[STORY] fora do escopo", &["[STORY]"]);
+        gone.parent = Some(1);
+        gone.open = false;
+        let d = detail("corpo");
+        f.merge("docs/features/pedidos/spec.md", SPEC);
+        f.merge("docs/features/pedidos/plan.md", PLAN);
+        let plan = "# Plano de QA — x\n<!-- spec-wave:qa-plan v1 issue=1 -->\n\n## Cenário 1 — Story #12\n\n**Critério:** lista\n**Esperado:** 20 pedidos\n";
+        f.merge("docs/features/pedidos/qa-plan.md", plan);
+        // a Story dropped in a re-scope needs no scenario
+        let snap = qa_snap(vec![feature.clone(), s12.clone(), gone]);
+        let Planned::Critique(job) = f.ctx().qa_plan_step(&feature, &d, &snap).unwrap() else {
+            panic!("the merged plan was not audited")
+        };
+        assert_eq!(job.args["document"], plan);
+        // an open Story with none stops it before any session
+        let mut s15 = item(15, "[STORY] filtrar", &["[STORY]"]);
+        s15.parent = Some(1);
+        let e = f
+            .ctx()
+            .qa_plan_step(&feature, &d, &qa_snap(vec![feature.clone(), s12, s15]))
+            .unwrap_err();
+        assert!(
+            e.contains("was not audited") && e.contains("A Story #15 (filtrar)"),
+            "{e}"
+        );
+        // the one read was why #16 was closed
+        assert!(
+            f.calls().iter().all(|c| c.starts_with("issue view 16 ")),
+            "{:?}",
+            f.calls()
+        );
     }
 
     #[test]

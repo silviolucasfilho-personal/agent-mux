@@ -1651,6 +1651,55 @@ parser of `lib/qa-plan-doc.mjs`.
 - **Not built:** visual evidence (`evidenceFiles`, `qa.evidence`), a
   Story tested across several repositories (the first is used, and the
   command says so), and `qa` on the screens beyond the `Q` key.
-- **Left of phase 5:** the `qa-plan` step (write, publish and audit the
+- **Left of phase 5 (at the time):** the `qa-plan` step (write, publish and audit the
   plan, which is what grants `qa-ready`), the QA of a milestone
+  (`qa-trail plan|run|report`), and `preflight` / `audit --milestone`.
+
+## 33. Phase 5, second part, as built
+
+The `qa-plan` step: the port of spec-wave's `generate-qa-plan`
+(`commands/generate-qa-plan.mjs`, `lib/qa-plan-doc.mjs`, the prompts of
+`plugin/skills/qa/`). It is what grants `spec-wave:qa-ready`, so with it
+`project qa` no longer depends on a plan spec-wave's own tools wrote.
+
+- **The step** is `project run <feature> --step qa-plan`
+  (`run::Ctx::qa_plan_step`). It is never the automatic next step of an
+  item: `next::next_step` is unchanged, and the operator asks for it (the
+  command, or `Q` on a Feature without `qa-ready`). It refuses a Story
+  (naming its Feature), a Bug and any other type, an issue with
+  `needs-human` or `critique-failed`, a Feature whose `spec.md` or
+  `plan.md` is not on the default branch, and one with no Story. A
+  refusal is an error line and writes nothing.
+- **Generation** is the flow `project-qa-plan` (skill
+  `wf-project-qa-plan`, spec-wave's `model-prompt.md` in Portuguese;
+  agent `qa-analyst`, read-only), given spec-wave's payload: the
+  Feature, its Stories with their bodies read from GitHub, the spec and
+  the plan. The answer is `{document}`; `qa_plan::parse_answer` reads it
+  without asking for the marker, `qa_plan::render` writes the file
+  (spec-wave's `renderQaPlanDoc`: title, marker, positional numbers) and
+  `qa_plan::validate` (spec-wave's `validateQaPlan`, its messages) checks
+  it **before** the publication; spec-wave publishes first and validates
+  after. `deliver::publish` then opens the pull request on
+  `spec-wave/<n>-qa-plan`.
+- **A plan that is there** is validated and audited as it is, never
+  generated again: from the default branch, else from the artifact
+  branch on the remote (`deliver::read_branch_file`). A validation
+  failure stops the step before any session.
+- **A dropped Story** is one closed with GitHub's reason `NOT_PLANNED`,
+  read at the step (`github::close_reason`; the snapshot does not keep
+  the reason). It needs no scenario and is left out of the payload.
+- **The audit** is `critique::Kind::Qa` through the same flow
+  `project-critique` (`kind = "qa"`, spec-wave's
+  `model-prompt.critique.md`), with the same attempt counter, 🔎 comment
+  and `needs-human` ceiling as the other documents
+  (`<!-- spec-wave:critique kind=qa … -->`, so either tool counts the
+  other's attempts). Grave: `critique-failed`, and `qa-ready` is removed
+  when present. Clean: `critique-failed` is lifted, `qa-ready` added and
+  the 🧪 comment posted with the scenarios per Story.
+- **Different from spec-wave:** the trigger label `spec-wave:qa` is
+  neither needed nor removed; a refusal or a failed validation leaves no
+  comment on the issue; the audit is not given the decomposition or the
+  tech context; and a Tech Leader's decisions on findings
+  (`risk-accepted`) are not applied, as for every other document.
+- **Left of phase 5:** the QA of a milestone
   (`qa-trail plan|run|report`), and `preflight` / `audit --milestone`.
