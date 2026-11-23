@@ -1119,6 +1119,32 @@ impl ProjectView {
                 let Some(snap) = &self.snap else {
                     return Some(Outcome::None);
                 };
+                // a Feature whose plan is not released: the step that writes
+                // it, or audits the one that is there
+                if it.item_type == Some(ItemType::Feature)
+                    && !it.has_label(crate::project::contract::LABEL_QA_READY)
+                {
+                    let n = it.number;
+                    self.modal = Some(Modal::Confirm {
+                        lines: vec![
+                            format!("Write the QA plan of #{n}?"),
+                            "A read-only session writes qa-plan.md from the merged spec and plan, with scenarios for each Story. agent-mux validates it and opens its pull request; nothing is written to your checkout.".into(),
+                            "A plan that is already there (merged, or on its pull request) is not written again: it is validated and audited as it is, so your edits stay.".into(),
+                            "A second session audits the plan. Clean: `spec-wave:qa-ready` is added, and `Q` then runs the scenarios. Grave findings: `spec-wave:critique-failed`, and nothing runs until the plan is corrected.".into(),
+                        ],
+                        op: Op::Process {
+                            number: n,
+                            args: vec![
+                                "run".into(),
+                                n.to_string(),
+                                "--step".into(),
+                                "qa-plan".into(),
+                            ],
+                            what: "the QA plan".into(),
+                        },
+                    });
+                    return Some(Outcome::None);
+                }
                 // the gate, from the cache; the command decides on what GitHub says
                 let feature = snap
                     .ancestor(it.number, ItemType::Feature)
@@ -3609,6 +3635,25 @@ mod tests {
                 .any(|l| l.contains("one Bug per failed scenario"))
         );
         assert!(matches!(op, Op::Process { args, .. } if args == &["qa", &story.0.to_string()]));
+
+        // on the Feature itself: the step that writes or audits its plan,
+        // until the plan is released
+        v.modal = None;
+        for i in v.snap.as_mut().unwrap().items.iter_mut() {
+            if i.number == story.1 {
+                i.labels.retain(|l| l != LABEL_QA_READY);
+            }
+        }
+        v.item.as_mut().unwrap().number = story.1;
+        v.handle_key(&key(KeyCode::Char('Q')));
+        let Some(Modal::Confirm { lines, op }) = &v.modal else {
+            panic!("no confirmation: {:?}", v.modal)
+        };
+        assert!(lines[0].contains(&format!("Write the QA plan of #{}", story.1)));
+        assert!(matches!(
+            op,
+            Op::Process { args, .. } if args == &["run", &story.1.to_string(), "--step", "qa-plan"]
+        ));
     }
 
     #[test]

@@ -130,6 +130,99 @@ fn trim_blank_edges(lines: &[String]) -> String {
 /// Reads a `qa-plan.md`. `Err` is spec-wave's message, in Portuguese: it
 /// is shown to the person who has to fix the file.
 pub fn parse(markdown: &str) -> Result<QaPlan, String> {
+    parse_with(markdown, true)
+}
+
+/// Reads what a session answered: the same file, whose marker Rust writes
+/// afterwards, so one that is missing is not an error.
+pub fn parse_answer(markdown: &str) -> Result<QaPlan, String> {
+    parse_with(markdown, false)
+}
+
+/// The file, written by Rust from a session's scenarios (spec-wave's
+/// `renderQaPlanDoc`): the title, the marker, and each scenario numbered
+/// by its position with its body as it came.
+pub fn render(title: &str, issue: u64, scenarios: &[(u64, String)]) -> String {
+    let flat = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let head = if flat.is_empty() {
+        "# Plano de QA".to_string()
+    } else {
+        format!("# Plano de QA — {flat}")
+    };
+    let mut blocks = vec![format!(
+        "{head}\n<!-- spec-wave:qa-plan v{VERSION} issue={issue} -->"
+    )];
+    for (i, (story, body)) in scenarios.iter().enumerate() {
+        blocks.push(format!("## Cenário {} — Story #{story}", i + 1));
+        let lines: Vec<String> = body
+            .replace("\r\n", "\n")
+            .split('\n')
+            .map(str::to_string)
+            .collect();
+        let body = trim_blank_edges(&lines);
+        if !body.is_empty() {
+            blocks.push(body);
+        }
+    }
+    format!("{}\n", blocks.join("\n\n"))
+}
+
+/// A Story of the Feature, as the validation needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoryRef {
+    pub number: u64,
+    pub title: String,
+    /// Closed as not planned: a Story dropped in a re-scope needs no
+    /// scenario.
+    pub discarded: bool,
+}
+
+/// What is wrong with a plan before any model audits it (spec-wave's
+/// `validateQaPlan`): a scenario of a Story that is not the Feature's, one
+/// with no criterion or no expected result, a Story with no scenario, and
+/// the signs of a file cut short. Empty when the plan is sound.
+pub fn validate(plan: &QaPlan, stories: &[StoryRef], content: &str) -> Vec<String> {
+    let mut errors = Vec::new();
+    for s in &plan.scenarios {
+        if !stories.iter().any(|st| st.number == s.story) {
+            errors.push(format!(
+                "{} referencia a Story #{}, que não é sub-issue desta Feature — corrija o número (ou o plano está desatualizado em relação à decomposição).",
+                s.anchor, s.story
+            ));
+        }
+        if s.criterio.is_empty() {
+            errors.push(format!(
+                "{} está sem `**Critério:**` — todo cenário precisa dizer QUAL critério de aceite valida.",
+                s.anchor
+            ));
+        }
+        if s.esperado.is_empty() {
+            errors.push(format!(
+                "{} está sem `**Esperado:**` — sem resultado esperado não há como dar veredito.",
+                s.anchor
+            ));
+        }
+    }
+    for st in stories.iter().filter(|st| !st.discarded) {
+        if !plan.scenarios.iter().any(|s| s.story == st.number) {
+            errors.push(format!(
+                "A Story #{}{} não tem nenhum cenário — toda Story da Feature precisa de ao menos um.",
+                st.number,
+                if st.title.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", st.title)
+                }
+            ));
+        }
+    }
+    for sign in super::docs::incomplete_signs(content) {
+        errors.push(format!("O arquivo parece incompleto: {sign}"));
+    }
+    errors
+}
+
+fn parse_with(markdown: &str, require_marker: bool) -> Result<QaPlan, String> {
     let text = markdown.replace("\r\n", "\n").replace('\r', "\n");
     if text.trim().is_empty() {
         return Err(invalid("o arquivo está vazio"));
@@ -205,11 +298,12 @@ pub fn parse(markdown: &str) -> Result<QaPlan, String> {
             "há um bloco de código (```) aberto e nunca fechado — feche-o para que os títulos seguintes voltem a ser reconhecidos",
         ));
     }
-    let Some((version, issue)) = marker else {
+    if marker.is_none() && require_marker {
         return Err(invalid(&format!(
             "não encontrei o marcador `<!-- spec-wave:qa-plan v{VERSION} … -->` — o arquivo não parece um qa-plan.md do spec-wave"
         )));
-    };
+    }
+    let (version, issue) = marker.unwrap_or((VERSION, None));
     if version > VERSION {
         return Err(invalid(&format!(
             "está no formato v{version} e esta versão entende até v{VERSION}"
@@ -393,6 +487,69 @@ pub(crate) mod tests {
         );
         let open = "<!-- spec-wave:qa-plan v1 -->\n## Cenário 1 — Story #1\n```\nx\n";
         assert!(parse(open).unwrap_err().contains("nunca fechado"));
+    }
+
+    #[test]
+    fn an_answer_is_rendered_with_the_marker_and_positional_numbers() {
+        // what a session answers: no marker, numbers of its own
+        let answer = "# Plano de QA — qualquer\n\n## Cenário 5 — Story #12\n\n**Critério:** lista\n**Esperado:** 20\n\n\n## Cenário 9 — Story #15\n**Critério:** filtro\n**Esperado:** mês\n";
+        assert!(parse(answer).is_err(), "the file itself needs its marker");
+        let got = parse_answer(answer).unwrap();
+        let file = render(
+            "[FEATURE]  Pedidos",
+            3,
+            &got.scenarios
+                .iter()
+                .map(|s| (s.story, s.body.clone()))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            file,
+            "# Plano de QA — [FEATURE] Pedidos\n<!-- spec-wave:qa-plan v1 issue=3 -->\n\n## Cenário 1 — Story #12\n\n**Critério:** lista\n**Esperado:** 20\n\n## Cenário 2 — Story #15\n\n**Critério:** filtro\n**Esperado:** mês\n"
+        );
+        // and the file reads back as the same scenarios
+        let back = parse(&file).unwrap();
+        assert_eq!(back.issue, Some(3));
+        assert_eq!(back.scenarios.len(), 2);
+        assert_eq!(back.scenarios[1].esperado, "mês");
+    }
+
+    #[test]
+    fn a_plan_is_checked_before_any_model_audits_it() {
+        let story = |number: u64, discarded: bool| StoryRef {
+            number,
+            title: format!("s{number}"),
+            discarded,
+        };
+        let p = parse(PLAN).unwrap();
+        assert!(validate(&p, &[story(12, false), story(15, false)], PLAN).is_empty());
+        // a Story with no scenario, unless it was dropped in a re-scope
+        let e = validate(
+            &p,
+            &[story(12, false), story(15, false), story(16, false)],
+            PLAN,
+        );
+        assert_eq!(e.len(), 1);
+        assert!(
+            e[0].contains("A Story #16 (s16) não tem nenhum cenário"),
+            "{e:?}"
+        );
+        assert!(
+            validate(
+                &p,
+                &[story(12, false), story(15, false), story(16, true)],
+                PLAN
+            )
+            .is_empty()
+        );
+        // a scenario of a Story that is not the Feature's
+        let e = validate(&p, &[story(12, false)], PLAN);
+        assert!(e[0].contains("Cenário 3 referencia a Story #15"), "{e:?}");
+        // no criterion, no expected result
+        let bare = "<!-- spec-wave:qa-plan v1 -->\n## Cenário 1 — Story #12\n**Passos:**\n1. x\n";
+        let e = validate(&parse(bare).unwrap(), &[story(12, false)], bare);
+        assert!(e.iter().any(|x| x.contains("sem `**Critério:**`")), "{e:?}");
+        assert!(e.iter().any(|x| x.contains("sem `**Esperado:**`")), "{e:?}");
     }
 
     #[test]

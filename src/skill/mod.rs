@@ -163,6 +163,7 @@ pub fn builtin_packages() -> Vec<BuiltinPackage> {
         wf_skill!("wf-project-refine"),
         wf_skill!("wf-project-insights"),
         wf_skill!("wf-project-qa"),
+        wf_skill!("wf-project-qa-plan"),
     ]
 }
 

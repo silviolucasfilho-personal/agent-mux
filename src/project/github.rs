@@ -687,6 +687,32 @@ pub struct Detail {
     pub comments: Vec<Comment>,
 }
 
+/// Why a closed issue was closed, as GitHub says it (`COMPLETED`,
+/// `NOT_PLANNED`, `DUPLICATE`; empty when it says nothing). Probed:
+/// `gh issue view --json stateReason` (gh's JSON FIELDS, 2026-11-23).
+pub fn close_reason(tools: &Tools, cfg: &ProjectConfig, number: u64) -> Result<String, String> {
+    let what = "gh issue view";
+    let out = gh(
+        tools,
+        cfg.root(),
+        &[
+            "issue",
+            "view",
+            &number.to_string(),
+            "-R",
+            &cfg.hub_repo().slug(),
+            "--json",
+            "stateReason",
+        ],
+        what,
+    )?;
+    Ok(json(&out, what)?
+        .get("stateReason")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string())
+}
+
 pub fn issue_detail(tools: &Tools, cfg: &ProjectConfig, number: u64) -> Result<Detail, String> {
     let what = "gh issue view";
     let out = gh(

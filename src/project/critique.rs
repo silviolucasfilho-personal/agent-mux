@@ -25,6 +25,8 @@ pub enum Kind {
     Plan,
     Stories,
     Bug,
+    /// The QA plan of a Feature.
+    Qa,
 }
 
 impl Kind {
@@ -34,6 +36,7 @@ impl Kind {
             Kind::Plan => "plan",
             Kind::Stories => "stories",
             Kind::Bug => "bug",
+            Kind::Qa => "qa",
         }
     }
 
@@ -44,6 +47,7 @@ impl Kind {
             Kind::Plan => "plan.md",
             Kind::Stories => "decomposition.md",
             Kind::Bug => "bug.md",
+            Kind::Qa => "qa-plan.md",
         }
     }
 }
@@ -261,6 +265,10 @@ fn trailer(kind: Kind, grave: bool) -> String {
             "⛔ Há findings **graves**: a label `{LABEL_CRITIQUE_FAILED}` bloqueia a triagem até ser removida. Um bug com causa raiz errada produz correção errada — corrija o `bug.md` e reaplique `spec-wave:bug`."
         ),
         (Kind::Bug, false) => "_Findings menores não bloqueiam a triagem._".to_string(),
+        (Kind::Qa, true) => format!(
+            "⛔ Há findings **graves**: a label `{LABEL_CRITIQUE_FAILED}` foi aplicada e o plano **não foi liberado** — nenhuma execução de QA roda até a correção. Corrija o `qa-plan.md`, remova a label e peça uma nova crítica (`agent-mux project run <feature> --step qa-plan`)."
+        ),
+        (Kind::Qa, false) => "_Findings menores não bloqueiam a liberação do plano._".to_string(),
     }
 }
 

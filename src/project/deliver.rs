@@ -330,6 +330,29 @@ pub fn read_base_file(repo: &Path, path: &str) -> Result<Option<String>, String>
     Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
 }
 
+/// A file as it is on a branch of the remote, fetched now: a document
+/// still on its artifact branch, waiting for its merge. `None` when the
+/// branch or the file is not there.
+pub fn read_branch_file(repo: &Path, branch: &str, path: &str) -> Result<Option<String>, String> {
+    if !remote_has(repo, branch)? {
+        return Ok(None);
+    }
+    push_rules::fetch(repo, branch)?;
+    let spec = format!("origin/{branch}:{path}");
+    if git(repo, &["cat-file", "-e", &spec]).is_err() {
+        return Ok(None);
+    }
+    let out = Command::new("git")
+        .args(["show", &spec])
+        .current_dir(repo)
+        .output()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+}
+
 #[cfg(all(test, unix))]
 pub(crate) mod tests {
     use super::*;

@@ -229,6 +229,25 @@ agent-mux project merge <story or bug> --yes   one item's pull request
 
 `P` on a screen shows the same plan from the cache and asks before it starts the command.
 
+### The QA plan of a Feature
+
+```
+agent-mux project run <feature> --step qa-plan --dry-run   what it would do
+agent-mux project run <feature> --step qa-plan             write the plan, or audit the one that is there
+```
+
+The plan (`qa-plan.md`, beside the Feature's spec) holds the scenarios `project qa` executes, each owned by one Story. The step needs the Feature's `spec.md` and `plan.md` on the default branch and at least one Story, and stops while `spec-wave:needs-human` or `spec-wave:critique-failed` is on the issue. It is a Feature's step: on a Story it names the Feature, and a Bug has no plan.
+
+1. **A read-only session writes the scenarios** (flow `project-qa-plan`, agent `qa-analyst`) from the spec's acceptance criteria, the plan and the Feature's real Stories. It writes no file.
+2. **agent-mux renders and checks the file**: the marker and the scenario numbers are its own, every scenario names a Story of the Feature and has a `**Critério:**` and an `**Esperado:**`, and every Story has at least one scenario (one closed as not planned needs none). A plan that fails is not published.
+3. **The plan is published** on `spec-wave/<n>-qa-plan` with a pull request, and the issue gets a comment. Your checkout is not touched.
+4. **A second session audits it** against the spec and the plan (flow `project-critique`, kind `qa`): a criterion with no scenario, a scenario that would pass without the implementation, an expected result nobody can observe. The 🔎 comment is spec-wave's.
+5. **Clean:** `spec-wave:qa-ready` is added and a comment says how many scenarios each Story has. **Grave findings:** `spec-wave:critique-failed`, `qa-ready` is taken off if it was there, and no QA runs until the plan is corrected. After the third failed audit the step stops with `spec-wave:needs-human`.
+
+A plan that already exists, merged or still on its pull request's branch, is never written again: the step validates and audits it as it is, so what you edited stays. Run the step again after editing; delete the file to have another written. `qa-ready` is the gate a person holds: a green QA run moves the board by itself, so read the scenarios before the pull request is merged. `project qa` reads the plan from the default branch only.
+
+`Q` on a Feature whose plan is not released starts this step after a confirmation; once `qa-ready` is there, `Q` runs the QA.
+
 ### QA of an item
 
 ```
@@ -414,6 +433,7 @@ agent-mux project insights [<n>] [--scope progress|tech|daily|brainstorm] [--top
 agent-mux project estimate <n> [--yes] [--discard] [--harness H] [--dry-run] [--json]
 agent-mux project refine <n> [--yes] [--discard] [--harness H] [--dry-run] [--json]
 agent-mux project run <n> [--step …] [--harness H] [--critic H] [--dry-run] [--apply] [--ignore-dependencies] [--keep-drafts]
+agent-mux project run <feature> --step qa-plan [--harness H] [--critic H] [--dry-run]
 ```
 
 The first block reads. The second writes to GitHub at once, with no confirmation: typing the command is the confirmation. `advance` and `merge` alone print their plan and need `--yes`. `task start` refuses while another Task of the same Story is in progress.
@@ -445,7 +465,8 @@ A read that fails never becomes a fact. A document whose listing failed is `unkn
 ## 9. Not built yet
 
 - Closing the hub issue of a cross-repository Story when it reaches Done, and a Bug or a Task across several repositories.
-- Writing the QA plan (`qa-plan.md`) and auditing it, and the QA of a milestone (the trail and its cycles).
+- The QA of a milestone (the trail and its cycles), and the milestone's preflight and audit.
+- Starting the QA plan from the `spec-wave:qa` label, and the comments spec-wave leaves when the step is refused: the command prints the reason instead.
 - In the fleet: dispatching to a named developer from the screens (the command does it), the extra tracks of spec-wave's queue label (`devAgent.queues`), and rounds inside a run.
 - On the Observability screen: cost by model, critique attempts per document, and the time from Ready to Review.
 - Recording a Tech Leader's decision on a finding (`risk-accepted`).

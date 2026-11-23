@@ -1,0 +1,29 @@
+# A step of the Projects flow (docs/project.md): one read-only session.
+# The session writes no file: it answers the QA plan's scenarios, which
+# agent-mux renders as qa-plan.md, validates, commits and opens as a pull
+# request. An audit of the plan follows before it is released.
+[workflow]
+name = "project-qa-plan"
+description = "Write the QA plan (qa-plan.md) of a Feature from the acceptance criteria of its spec, with scenarios per Story."
+when_to_use = "Started by `agent-mux project run <feature> --step qa-plan` for a Feature whose spec.md and plan.md are merged and that has Stories."
+output = "work"
+default_isolation = "none"
+
+[args.payload]
+description = "The Feature, its real Stories (number, title, body), its spec.md and its plan.md, as JSON."
+required = true
+[args.workspace]
+description = "The code repositories of the Project and their folders, when the hub holds only documents."
+default = ""
+
+[schemas.document]
+fields.document = { type = "string", required = true }
+
+[[steps]]
+id = "work"
+phase = "Work"
+agent = "qa-analyst"
+skill = "wf-project-qa-plan"
+isolation = "none"
+args = { payload = "{args.payload}", workspace = "{args.workspace}" }
+result = "document"

@@ -45,6 +45,7 @@ const FINDINGS_JSON: &str =
     r#"{"findings":[{"severity":"menor","anchor":"Backend","text":"ordem das seções"}]}"#;
 
 const VERDICTS_JSON: &str = r#"{"scenarios":[{"cenario":1,"verdict":"pass","evidencia":"GET /pedidos -> 200, 20 itens"},{"cenario":2,"verdict":"blocked","blockedReason":"ambiente","evidencia":"banco fora do ar"}]}"#;
+const QA_PLAN_JSON: &str = r##"{"document":"# Plano de QA\n\n## Cenário 3 — Story #12\n**Critério:** AC-1 lista paginada\n**Esperado:** 20 pedidos na primeira página\n"}"##;
 const INSIGHT_JSON: &str =
     r#"{"text":"Uma Story pronta, nada bloqueado.","actions":["Construir #12"]}"#;
 const ESTIMATE_JSON: &str =
@@ -94,6 +95,8 @@ if grep -q '"findings"' "$AGENT_MUX_WORKFLOW_CONTEXT"; then
 elif grep -q '"blockedReason"' "$AGENT_MUX_WORKFLOW_CONTEXT"; then
   pwd > "$r/qa.cwd"
   emit '{verdicts}'
+elif grep -q '\\"stories\\"' "$AGENT_MUX_WORKFLOW_CONTEXT"; then
+  emit '{qa_plan}'
 elif grep -q '"digest"' "$AGENT_MUX_WORKFLOW_CONTEXT"; then
   emit '{insight}'
 elif grep -q '"rationale"' "$AGENT_MUX_WORKFLOW_CONTEXT"; then
@@ -109,6 +112,7 @@ exit 0
         findings = FINDINGS_JSON,
         estimate = ESTIMATE_JSON,
         insight = INSIGHT_JSON,
+        qa_plan = QA_PLAN_JSON,
         verdicts = VERDICTS_JSON,
         refined = REFINED_JSON,
         plan = PLAN_JSON,
@@ -905,6 +909,135 @@ async fn the_qa_flow_answers_a_verdict_per_scenario() {
     assert!(std::fs::read_to_string(f.root.join("gh-calls")).is_err());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_qa_plan_is_written_published_audited_and_released() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut f = fixture();
+    // a gh that also answers the read of a Story
+    let gh = f.root.join("gh");
+    std::fs::write(
+        &gh,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$(printf '%s ' \"$@\" | tr '\\n' ' ')\" >> \"{}/gh-calls\"\ncase \"$1 $2\" in\n  \"pr create\") echo 'https://github.com/acme/hub/pull/7' ;;\n  \"issue view\") echo '{{\"title\":\"[STORY] ver pedidos\",\"body\":\"Como cliente\",\"url\":\"u\",\"comments\":[]}}' ;;\n  *) echo ok ;;\nesac\n",
+            f.root.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // the plan.md is merged too
+    std::fs::write(
+        f.hub.join("docs/features/pedidos/plan.md"),
+        "# Estratégia Técnica\nGET /pedidos\n",
+    )
+    .unwrap();
+    git(&f.hub, &["add", "-A"]);
+    git(&f.hub, &["commit", "-q", "-m", "plan"]);
+    git(&f.hub, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+    let head_before = git(&f.hub, &["rev-parse", "HEAD"]);
+
+    let cfg = agent_mux::project::config::load(&f.hub).unwrap();
+    let item = feature();
+    let mut story = feature();
+    story.number = 12;
+    story.title = "[STORY] ver pedidos".into();
+    story.item_type = Some(ItemType::Story);
+    story.parent = Some(1);
+    let snap = agent_mux::project::Snapshot {
+        hub: "acme/hub".into(),
+        items: vec![item.clone(), story],
+        ..Default::default()
+    };
+    let detail = Detail {
+        title: item.title.clone(),
+        body: "Como cliente quero ver meus pedidos".into(),
+        url: "https://github.com/acme/hub/issues/1".into(),
+        comments: vec![],
+    };
+    let ctx = || Ctx {
+        tools: &f.tools,
+        cfg: &cfg,
+        hub_root: f.hub.clone(),
+        scratch: f.root.join("scratch"),
+    };
+    let Planned::Generate(g) = ctx().qa_plan_step(&item, &detail, &snap).unwrap() else {
+        panic!("the step is not a generation")
+    };
+    assert_eq!(g.flow, run::FLOW_QA_PLAN);
+    let args = g.args.clone();
+    let result = run_flow(&mut f, run::FLOW_QA_PLAN, args).await;
+    // the session ran in the hub and was given the Story and the spec
+    let ctx_file = std::fs::read_to_string(f.bin.join("calls").join("0.ctx.json")).unwrap();
+    assert!(ctx_file.contains("Como cliente") && ctx_file.contains("Critérios de Aceite"));
+    let ctx = || Ctx {
+        tools: &f.tools,
+        cfg: &cfg,
+        hub_root: f.hub.clone(),
+        scratch: f.root.join("scratch"),
+    };
+    let (report, follow) = ctx().finish_generate(&item, &detail, &g, &result).unwrap();
+    assert!(
+        report.lines[0].contains("qa-plan.md published on spec-wave/1-qa-plan"),
+        "{report:?}"
+    );
+    let origin = f.root.join("origin.git");
+    let file = git(
+        &origin,
+        &[
+            "show",
+            "spec-wave/1-qa-plan:docs/features/pedidos/qa-plan.md",
+        ],
+    );
+    // the marker and the number are Rust's, the scenario the session's
+    assert!(
+        file.starts_with(
+            "# Plano de QA — [FEATURE] Pedidos\n<!-- spec-wave:qa-plan v1 issue=1 -->\n\n## Cenário 1 — Story #12\n"
+        ),
+        "{file}"
+    );
+    assert!(file.contains("**Esperado:** 20 pedidos na primeira página"));
+    assert_eq!(git(&origin, &["rev-parse", "main"]), head_before);
+    assert_eq!(git(&f.hub, &["rev-parse", "HEAD"]), head_before);
+
+    // the audit, then the release
+    let Some(Planned::Critique(job)) = follow else {
+        panic!("no audit followed the plan")
+    };
+    assert_eq!(job.kind, Kind::Qa);
+    let findings = run_flow(&mut f, run::FLOW_CRITIQUE, job.args.clone()).await;
+    let ctx = Ctx {
+        tools: &f.tools,
+        cfg: &cfg,
+        hub_root: f.hub.clone(),
+        scratch: f.root.join("scratch"),
+    };
+    let report = ctx
+        .finish_critique(&item, &job, &findings, "claude")
+        .unwrap();
+    assert!(
+        report
+            .lines
+            .last()
+            .unwrap()
+            .contains("spec-wave:qa-ready` is on #1"),
+        "{report:?}"
+    );
+    let calls = std::fs::read_to_string(f.root.join("gh-calls")).unwrap();
+    let calls: Vec<&str> = calls.lines().collect();
+    let writes: Vec<&&str> = calls
+        .iter()
+        .filter(|c| !c.starts_with("issue view"))
+        .collect();
+    assert!(writes[0].starts_with("pr create --base main --head spec-wave/1-qa-plan"));
+    assert!(writes[1].contains("qa-plan.md gerado automaticamente"));
+    assert!(writes[2].contains("<!-- spec-wave:critique kind=qa attempt=1 verdict=limpa -->"));
+    assert_eq!(
+        *writes[3],
+        "issue edit 1 -R acme/hub --add-label spec-wave:qa-ready "
+    );
+    assert!(writes[4].contains("Plano de QA pronto para revisão humana"));
+    assert_eq!(writes.len(), 5, "{writes:?}");
+}
+
 #[test]
 fn the_step_flows_are_built_in_and_valid() {
     for flow in [
@@ -912,6 +1045,7 @@ fn the_step_flows_are_built_in_and_valid() {
         run::FLOW_PLAN,
         run::FLOW_BUG,
         run::FLOW_CRITIQUE,
+        run::FLOW_QA_PLAN,
     ] {
         let text = library::builtin(flow).unwrap_or_else(|| panic!("{flow} is not built in"));
         assert!(

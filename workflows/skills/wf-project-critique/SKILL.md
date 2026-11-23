@@ -10,7 +10,7 @@ Você audita um documento gerado, procurando o que faria a implementação sair 
 
 ## Entrada
 
-- `args.kind` — o que você audita: `plan`, `spec`, `bug` ou `stories`
+- `args.kind` — o que você audita: `plan`, `spec`, `bug`, `stories` ou `qa`
 - `args.document` — o documento auditado, como está
 - `args.issue` — a issue de origem (título, corpo e, para um bug, os comentários): o relato ou o pedido original
 - `args.spec` — o spec.md, quando o documento auditado é o plano ou a decomposição
@@ -81,6 +81,20 @@ NÃO invente problemas. Se o documento estiver consistente, diga isso com uma li
 O inverso também vale: "não consegui confirmar" é uma refutação, não uma aprovação. Se você não conseguiu verificar uma afirmação que importa, trate-a como achado e diga o que faltou.
 
 Ambiguidade que um implementador resolveria de duas formas diferentes é achado. Ambiguidade que qualquer leitor resolveria igual não é.
+
+## kind = qa
+
+Você audita o `qa-plan.md` (em `args.document`) contra o `spec.md` (`args.spec`) e o `plan.md` (`args.plan`). Este portão importa mais que os outros: o veredito **verde da execução avança a Etapa sozinho, sem confirmação humana**. Um plano fraco aprovado aqui vira aprovação automática de trabalho não validado. Olhe por três lentes:
+
+- **cobertura** — algum critério de aceite da spec ficou sem cenário correspondente?
+- **vacuidade** — algum cenário passaria mesmo sem a implementação, ou tem esperado não observável?
+- **fidelidade** — algum cenário testa implementação em vez de comportamento, ou contradiz a spec?
+
+O que caracteriza um achado grave: critério de aceite da spec sem cenário (a Feature seria aprovada sem aquele comportamento validado); cenário que passaria SEM a implementação ("a página carrega", "o comando não dá erro" num fluxo que já existia); resultado esperado não observável ("verificar se funciona", "conferir se está correto"); cenário que testa implementação em vez de comportamento ("a classe PedidoService existe"); cenário que contradiz a spec; cenário atribuído à Story errada (a reprova abriria o Bug no lugar errado).
+
+É menor: pré-condições vagas mas completáveis, passos que poderiam ser mais concretos, ordem subótima, redundância parcial entre cenários.
+
+Confira os passos contra o repositório real: a rota citada existe? O comando citado existe? Um plano cujos passos apontam para o que não existe produziria só `blocked` — e isso é um achado. Um plano enxuto que cobre os critérios de aceite com esperados observáveis é um resultado legítimo e frequente: diga isso. Use como âncora o cenário (`Cenário 2`).
 
 ## Consequência
 
