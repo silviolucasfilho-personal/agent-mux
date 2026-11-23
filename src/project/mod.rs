@@ -25,7 +25,10 @@ pub mod decomposition;
 pub mod deliver;
 pub mod docs;
 pub mod doctor;
+pub mod fix_pr;
 pub mod github;
+pub mod launch;
+pub mod merge;
 pub mod next;
 pub mod ops;
 pub mod order;
@@ -35,6 +38,7 @@ pub mod stage;
 pub mod store;
 pub mod write;
 
+pub use launch::ProjectLaunch;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

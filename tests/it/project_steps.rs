@@ -461,9 +461,35 @@ async fn a_story_is_built_reviewed_and_delivered_as_a_draft() {
     );
 
     // 2. the sessions: the implementer commits in a worktree, the reviewer reads it there
+    f.app.project_launch = Some(agent_mux::project::ProjectLaunch {
+        hub: "acme/hub".into(),
+        item: 12,
+        item_type: Some("Story".into()),
+        step: "build".into(),
+        attempt: 1,
+        executor: "operator".into(),
+        ..Default::default()
+    });
     let (result, run_id) =
         run_flow_from(&mut f, b.flow, b.args.clone(), Some("origin/main".into())).await;
     assert_eq!(result["outcome"], "approved", "{result}");
+    // every session of the build names its work item on its launch row,
+    // and the item's trace finds them
+    {
+        let conn =
+            agent_mux::tracing::store::open_ro(&f.root.join("store").join("traces.db")).unwrap();
+        let report =
+            agent_mux::tracing::project_report::report(&conn, "acme/hub", 12, None).unwrap();
+        let roles: Vec<(&str, &str)> = report
+            .launches
+            .iter()
+            .map(|l| (l.project.role.as_str(), l.project.run.as_str()))
+            .collect();
+        assert_eq!(
+            roles,
+            vec![("work", run_id.as_str()), ("review", run_id.as_str())]
+        );
+    }
     let calls = f.bin.join("calls");
     let cwd = std::fs::read_to_string(calls.join("build.cwd")).unwrap();
     assert_ne!(
@@ -550,7 +576,11 @@ async fn a_story_is_built_reviewed_and_delivered_as_a_draft() {
 #[test]
 fn the_build_flows_review_in_a_worktree() {
     use agent_mux::project::build;
-    for flow in [build::FLOW_STORY, build::FLOW_BUG_FIX] {
+    for flow in [
+        build::FLOW_STORY,
+        build::FLOW_BUG_FIX,
+        agent_mux::project::fix_pr::FLOW_FIX_PR,
+    ] {
         let text = library::builtin(flow).unwrap_or_else(|| panic!("{flow} is not built in"));
         assert!(
             text.contains("kind = \"revise\"") && text.contains("default_isolation = \"worktree\"")

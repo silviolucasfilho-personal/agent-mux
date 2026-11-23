@@ -35,7 +35,13 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
   agent-mux project advance [--yes]
         the board moves the pull requests already justify; without --yes, only the plan
 
-  agent-mux project run <n> [--step spec|plan|bug|critique|validate|build|fix] [--harness H] [--critic H] [--dry-run] [--apply] [--ignore-dependencies]
+  agent-mux project merge <n> [--yes] [--keep-branches] [--dry-run]
+        merge the pull requests of a Feature's Stories in the order of their
+        dependencies (or of one Story or Bug): without --yes, only the plan. A draft
+        blocks it: marking a pull request ready is your review. Each merge is a
+        merge commit, moves the item to QA, and the branches go at the end
+
+  agent-mux project run <n> [--step spec|plan|bug|critique|validate|build|fix|fix-pr] [--harness H] [--critic H] [--dry-run] [--apply] [--ignore-dependencies]
         run the item's next document step: a read-only session writes the document,
         agent-mux publishes it by pull request and comments on the issue; a plan and
         a bug document are then audited by a second session; a decomposition is
@@ -45,6 +51,10 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
         writes and commits the code in a worktree of the code repository, a second
         one reviews the diff, and agent-mux pushes the branch, opens a draft pull
         request and moves the board to Code Review. Nothing is merged
+        --step fix-pr on a Story or Bug with an open pull request: a session fixes
+        what the open review comments ask for on the pull request's branch, a
+        second one reviews the fixes, and agent-mux pushes them, answers each
+        comment with its commit and leaves a summary
 
   every command: [--dir DIR] [--refresh] [--cached]
 
@@ -308,6 +318,7 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
             )
         }),
         Some("advance") => cmd_advance(&a),
+        Some("merge") => cmd_merge(&a),
         Some("run") => cmd_run(&a).await,
         None | Some("help") | Some("--help") | Some("-h") => {
             println!("{USAGE}");
@@ -419,6 +430,79 @@ fn cmd_advance(a: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `project merge <n> [--yes] [--keep-branches]`: the plan, and with
+/// `--yes` the merges.
+fn cmd_merge(a: &Args) -> anyhow::Result<()> {
+    use super::merge;
+    let mut e = env(a)?;
+    let n = number(a)?;
+    // a merge is planned on what GitHub says now
+    e.fresh = Fresh::Refresh;
+    let s = snap(&e)?;
+    let item = s
+        .item(n)
+        .ok_or_else(|| anyhow::anyhow!("issue #{n} is not in the Project"))?;
+    println!("#{n} {}", item.title);
+    let sorted = merge::scope(&s, n).map_err(|x| anyhow::anyhow!(x))?;
+    let cwd = steps::hub_root(&e.cfg).unwrap_or_else(|_| e.cfg.root().to_path_buf());
+    let ops = ops::Ops {
+        tools: &e.tools,
+        cfg: &e.cfg,
+        seen_board: s.board_id.clone(),
+    };
+    let (defaults, unread) = merge::default_branches(&ops, &cwd, &s, &sorted);
+    let mut plan = merge::plan(&sorted, &s, &defaults);
+    plan.warnings.extend(unread);
+    if a.flag("--json") {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+    } else {
+        for line in merge::plan_lines(&plan, &s.hub) {
+            println!("  {line}");
+        }
+    }
+    if !plan.blocks.is_empty() {
+        anyhow::bail!(
+            "blocked: half of a stack merged is the worst state; resolve the above and run again"
+        );
+    }
+    if plan.queue.is_empty() {
+        println!(
+            "  {}",
+            if plan.done.is_empty() {
+                "no open pull request to merge"
+            } else {
+                "everything is merged already"
+            }
+        );
+        return Ok(());
+    }
+    if a.flag("--dry-run") || !a.flag("--yes") {
+        println!(
+            "  nothing was merged: run again with --yes to merge in this order{}",
+            if a.flag("--keep-branches") {
+                ""
+            } else {
+                " and delete the branches at the end (--keep-branches keeps them)"
+            }
+        );
+        return Ok(());
+    }
+    let (report, stopped) = match merge::execute(&ops, &cwd, &s, &plan, a.flag("--keep-branches")) {
+        Ok(r) => (r, None),
+        Err((r, why)) => (r, Some(why)),
+    };
+    for line in &report.lines {
+        println!("  {line}");
+    }
+    if let Err(err) = refresh_touched(&e.conn, &e.tools, &e.cfg, &report.touched) {
+        eprintln!("the cache was not refreshed ({err}); `agent-mux project sync` reads it again");
+    }
+    if let Some(why) = stopped {
+        anyhow::bail!(why);
+    }
+    Ok(())
+}
+
 /// The harnesses a Project step may run on: the ones agent-mux traces.
 pub const HARNESSES: [Harness; 6] = [
     Harness::Claude,
@@ -452,11 +536,12 @@ async fn run_flow(
     harness: Harness,
     args: Value,
     model: Option<String>,
+    launch: super::ProjectLaunch,
 ) -> Result<Value, String> {
     let overrides = model
         .map(|m| vec![("work".to_string(), "model".to_string(), m)])
         .unwrap_or_default();
-    run_flow_in(flow, workspace, harness, args, overrides, None)
+    run_flow_in(flow, workspace, harness, args, overrides, None, launch)
         .await
         .map(|(result, _)| result)
 }
@@ -471,6 +556,7 @@ async fn run_flow_in(
     args: Value,
     step_overrides: Vec<(String, String, String)>,
     worktree_base: Option<String>,
+    launch: super::ProjectLaunch,
 ) -> Result<(Value, PathBuf), String> {
     use crate::app::workflows::WorkflowRunRequest;
     let entries = crate::workflows::cli::entries();
@@ -495,6 +581,8 @@ async fn run_flow_in(
         step_overrides,
     };
     let mut h = crate::workflows::cli::headless().map_err(|e| e.to_string())?;
+    // every session of the run records the work item it runs for
+    h.app.project_launch = Some(launch);
     let run_id = h.app.start_workflow_run(req)?;
     let run_dir = crate::workflows::context::run_dir(&h.app.workflows_runtime_dir(), &run_id);
     eprintln!("  {flow} on {} · run {run_id}", harness.as_str());
@@ -540,7 +628,9 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
         .item(n)
         .ok_or_else(|| anyhow::anyhow!("issue #{n} is not in the Project"))?
         .clone();
+    let fix_pr = matches!(a.value("--step"), Some("fix-pr" | "fix_pr" | "fixpr"));
     let forced = match a.value("--step") {
+        Some(_) if fix_pr => None,
         Some(step) => {
             Some(steps::forced_action(step, item.item_type).map_err(|x| anyhow::anyhow!(x))?)
         }
@@ -556,12 +646,31 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
         hub_root: hub_root.clone(),
     };
     println!("#{n} {}", item.title);
+    let hub = s.hub.clone();
+    let feature = s
+        .ancestor(n, ItemType::Feature)
+        .map(|f| f.number)
+        .filter(|f| *f != n);
+    let tagged = item.clone();
+    let launch = move |step: &str| super::ProjectLaunch {
+        hub: hub.clone(),
+        item: n,
+        item_type: tagged.item_type.map(|t| t.as_str().to_string()),
+        feature,
+        milestone: tagged.milestone.clone(),
+        step: step.to_string(),
+        attempt: 1,
+        executor: "operator".to_string(),
+        ..Default::default()
+    };
     // development is its own step: a Story, a triaged Bug, or `--step build`
     let develop = match forced {
         Some(f) => f == next::Action::Implement,
         None => super::build::decision(&item, &s, false).is_some(),
     };
-    let mut planned = if develop {
+    let mut planned = if fix_pr {
+        ctx.fix_plan(&item, &detail, &s)
+    } else if develop {
         ctx.build_plan(&item, &detail, &s, a.flag("--ignore-dependencies"))
     } else {
         ctx.plan(&item, &detail, forced)
@@ -634,6 +743,14 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
                     b.args.clone(),
                     Vec::new(),
                     Some(format!("origin/{}", b.base)),
+                    super::ProjectLaunch {
+                        code_repo: Some(b.target.repo.slug()),
+                        ..launch(if b.kind == super::build::BuildKind::Bug {
+                            "fix"
+                        } else {
+                            "build"
+                        })
+                    },
                 )
                 .await;
                 let done = ran.and_then(|(result, run_dir)| {
@@ -643,6 +760,75 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
                 match done {
                     Ok(r) => finish_report(&r, &mut touched),
                     // the board already says development: the cache must too
+                    Err(e) => failed = Some(e),
+                }
+                break;
+            }
+            Planned::FixPr(f) => {
+                let name = super::merge::pr_ref(&f.pull, &s.hub);
+                println!(
+                    "  next: fix what the review of pull request {name} asked for, with the flow {} on {}",
+                    super::fix_pr::FLOW_FIX_PR,
+                    harness.as_str()
+                );
+                println!(
+                    "  where: {} ({}), a worktree forked from origin/{}",
+                    f.target.dir.display(),
+                    f.target.repo.slug(),
+                    f.pull.head
+                );
+                for c in &f.comments {
+                    let first: String = c
+                        .body
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .chars()
+                        .take(90)
+                        .collect();
+                    println!(
+                        "    {} @{}{}: {first}",
+                        c.key,
+                        c.author,
+                        if c.place.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {}", c.place)
+                        }
+                    );
+                }
+                for line in &f.notes {
+                    println!("  {line}");
+                }
+                println!("  then: an independent review of the committed fixes");
+                println!(
+                    "  then: push to `{}`, answer each comment with its commit, leave a summary on the pull request",
+                    f.pull.head
+                );
+                if a.flag("--dry-run") {
+                    break;
+                }
+                crate::factory::deliver::fetch(&f.target.dir, &f.pull.head)
+                    .map_err(|x| anyhow::anyhow!(x))?;
+                let ran = run_flow_in(
+                    super::fix_pr::FLOW_FIX_PR,
+                    &f.target.dir,
+                    harness,
+                    f.args.clone(),
+                    Vec::new(),
+                    Some(format!("origin/{}", f.pull.head)),
+                    super::ProjectLaunch {
+                        code_repo: Some(f.target.repo.slug()),
+                        ..launch("fix-pr")
+                    },
+                )
+                .await;
+                let done = ran.and_then(|(result, run_dir)| {
+                    let wt = crate::app::workflows::load_step_worktrees(&run_dir).remove("build");
+                    ctx.fix_finish(&f, &result, wt.as_ref())
+                });
+                match done {
+                    Ok(r) => finish_report(&r, &mut touched),
                     Err(e) => failed = Some(e),
                 }
                 break;
@@ -717,9 +903,16 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
             }
             Planned::Generate(g) => {
                 let model = step_model(&e.cfg, harness, g.doc, &item.labels, 1);
-                let result = run_flow(g.flow, &hub_root, harness, g.args.clone(), model)
-                    .await
-                    .map_err(|x| anyhow::anyhow!(x))?;
+                let result = run_flow(
+                    g.flow,
+                    &hub_root,
+                    harness,
+                    g.args.clone(),
+                    model,
+                    launch(g.doc),
+                )
+                .await
+                .map_err(|x| anyhow::anyhow!(x))?;
                 let (r, follow) = ctx
                     .finish_generate(&item, &detail, &g, &result)
                     .map_err(|x| anyhow::anyhow!(x))?;
@@ -742,6 +935,10 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
                     critic,
                     job.args.clone(),
                     model,
+                    super::ProjectLaunch {
+                        attempt: job.attempt,
+                        ..launch("critique")
+                    },
                 )
                 .await
                 .map_err(|x| anyhow::anyhow!(x))?;

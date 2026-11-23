@@ -49,6 +49,8 @@ The left column holds the screens and, under them, the selected screen's rows. T
 | `m` | Move the selected item to a later stage |
 | `M` | Repair its stage: any stage, earlier ones included, with a reason |
 | `A` | Make the board moves its pull requests already justify |
+| `f` | Fix what the review of the item's pull request asked for (the fix-pr step) |
+| `P` | Merge: the pull requests of a Feature's Stories in order, or of one Story or Bug |
 | `t` `R` `D` | On a Bug: accept, reject, mark a duplicate |
 
 **The item screen** (`Enter` on an item) has five tabs: Card, Documents, Children, Pull requests and Thread. `Enter` opens what the cursor is on: a document on the default branch in the Markdown viewer (from the hub's checkout), a document still in review as its pull request in the browser, a child as its own item screen, a pull request in the browser. `Esc` goes back.
@@ -154,6 +156,52 @@ Where the code goes: the repository of the item's `repo:<slug>` label, found as 
 
 Commits carry spec-wave's trailers (`Spec-Wave-Story: #n`, `Spec-Wave-Tasks: #a, #b`), which its `merge` reads. The session is asked for them; when no commit has them, agent-mux adds one empty commit that does.
 
+### Fixing what a review asked for
+
+When a person reviewed an item's pull request and left comments, `f` on the item (or the command) sends them back to a session:
+
+```
+agent-mux project run <n> --step fix-pr --dry-run     the comments it would fix
+agent-mux project run <n> --step fix-pr
+```
+
+1. **agent-mux reads the review**: the threads that are not resolved, and the body of a review submitted after the branch's last commit. A thread this step already answered is left out until the reviewer writes in it again or resolves it. With nothing to fix, it stops and writes nothing.
+2. **One session fixes them** (flow `project-fix-pr`) in a worktree on the pull request's own branch, one commit per comment. A comment it should not apply (wrong, out of scope, a product decision) changes no code: the session declines it with a reason.
+3. **A second session reviews the new commits**, one criterion per comment. The work goes back at most twice.
+4. **agent-mux delivers**, only on an approval with every criterion passing: it pushes the commits to the pull request's branch (never forced), answers each thread with the commit that fixes it, or with the reason it was declined, and leaves one summary on the pull request.
+
+Nothing moves on the board, and no conversation is resolved for you: that is the reviewer's. The item must have exactly one open pull request, on a branch such as `story/…` or `fix/…`.
+
+### Merging
+
+`project merge` is the only place agent-mux merges, and only on your word:
+
+```
+agent-mux project merge <feature>              the plan: the order, the retargets, what blocks it
+agent-mux project merge <feature> --yes        merge in that order
+agent-mux project merge <story or bug> --yes   one item's pull request
+```
+
+- **The order** is the Stories' dependencies (`Depende de:`, blocked-by). A cycle has no order and stops the plan.
+- **A draft blocks the whole plan.** Marking a pull request ready is your review of it, so agent-mux never does it for you. Two open pull requests for one item in the same repository block it too.
+- **Each pull request** is read again, pointed at the default branch when it was based on another Story's branch, and merged with a merge commit (never a squash, which would break the pull requests stacked on it). Its Story or Bug then moves to QA, and the Feature follows once every Story is there.
+- **A merge GitHub refuses** (checks, a conflict) stops the queue there. What merged stays merged; run the command again and it resumes, since a merged pull request leaves the plan.
+- **The branches** are deleted at the end, when nothing open is based on them. `--keep-branches` keeps them.
+
+`P` on a screen shows the same plan from the cache and asks before it starts the command.
+
+### The sessions of an item
+
+Every session a step starts records the work item it runs for on its launch row (`launches.metadata.project`: hub, item, type, Feature, step, attempt, role, run). One command reads them back as one trace:
+
+```
+agent-mux trace project <n>            a tree: each step's run, and its sessions with turns, tools, tokens and cost
+agent-mux trace project <n> --log      one line per session, oldest first
+agent-mux trace project <n> --json
+```
+
+A Feature is read with its Stories and their Tasks. The hub is the one of the folder's `.spec-wave.json`; `--hub owner/repo` names another. Steps run before this version carry no tag and are not listed.
+
 ## 5. The next step
 
 Every card ends with the item's next step and why. It is the answer spec-wave's own `run` gives for the same issue: the code is a port of its `nextStep`.
@@ -197,9 +245,11 @@ agent-mux project triage accept <n> [--severity P]
 agent-mux project triage reject <n> --reason "…"
 agent-mux project triage duplicate <n> --of <original>
 agent-mux project advance [--yes]
+agent-mux project merge <n> [--yes] [--keep-branches] [--dry-run]
+agent-mux project run <n> [--step …] [--harness H] [--critic H] [--dry-run] [--apply] [--ignore-dependencies]
 ```
 
-The first block reads. The second writes to GitHub at once, with no confirmation: typing the command is the confirmation. `advance` alone prints its plan and needs `--yes`. `task start` refuses while another Task of the same Story is in progress.
+The first block reads. The second writes to GitHub at once, with no confirmation: typing the command is the confirmation. `advance` and `merge` alone print their plan and need `--yes`. `task start` refuses while another Task of the same Story is in progress.
 
 Every command takes `--dir DIR`, `--refresh` and `--cached`. A stage is typed as on the board or shorter: `--stage "code review"`, `--stage ready`.
 
@@ -227,9 +277,9 @@ A read that fails never becomes a fact. A document whose listing failed is `unkn
 
 ## 9. Not built yet
 
-- A Feature built as a stack of Stories, a Story across several repositories, `project merge`, and fixing a pull request's review comments.
+- A Feature built as a stack of Stories with its pull requests marked ready together, and a Story across several repositories.
 - QA and the dev-agent fleet (dispatch, slots, the lease).
-- Tagging a step's sessions with their work item in the trace store: a build is an ordinary flow run in the runs view today.
+- An item's Trace tab, the History badge and the Observability screen: the sessions of an item are read with `agent-mux trace project` only.
 - Recording a Tech Leader's decision on a finding (`risk-accepted`).
 - Driving the repository's own Actions by trigger label instead of agent-mux's flows.
 - Editing an item's title, body, milestone or priority from agent-mux.

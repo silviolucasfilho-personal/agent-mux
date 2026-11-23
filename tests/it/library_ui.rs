@@ -90,7 +90,7 @@ fn the_library_tree_has_the_three_sections_and_the_builtin_skill() {
     );
     // and it renders at the three widths the specs ask for
     for w in [80, 120, 180] {
-        let text = screen(&app, w, 40);
+        let text = screen(&app, w, 44);
         assert!(text.contains("FLOWS"), "width {w}:\n{text}");
         assert!(text.contains("SKILLS"), "width {w}:\n{text}");
         assert!(text.contains("PERSONAS"), "width {w}:\n{text}");

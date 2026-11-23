@@ -217,7 +217,7 @@ pub fn repo_dir(hub_root: &Path, cfg: &ProjectConfig, slug: &str) -> Result<Repo
     Ok(at(hub_root.join(CLONES_DIR).join(slug), "clone"))
 }
 
-fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("git")
         .args(args)
         .current_dir(cwd)
@@ -246,7 +246,7 @@ fn remote_slug(url: &str) -> String {
 
 /// The checkout must be the repository the label names: work pushed to
 /// another one would open its pull request in the wrong place.
-fn check_checkout(target: &RepoDir) -> Result<(), String> {
+pub(crate) fn check_checkout(target: &RepoDir) -> Result<(), String> {
     let name = target.slug.as_deref().unwrap_or("the hub");
     if !target.dir.is_dir() {
         return Err(format!(
@@ -1166,7 +1166,7 @@ impl<'a> Ctx<'a> {
     }
 }
 
-fn strings(v: &Value, key: &str) -> Vec<String> {
+pub(crate) fn strings(v: &Value, key: &str) -> Vec<String> {
     v.get(key)
         .and_then(Value::as_array)
         .map(|a| {

@@ -1,6 +1,6 @@
 ---
 name: wf-project-review
-description: Use when an agent-mux Project run needs the independent verdict on a built Story or a fixed Bug. Reads the committed diff, checks every acceptance criterion with evidence, and answers approve, request_changes or reject.
+description: Use when an agent-mux Project run needs the independent verdict on a built Story, a fixed Bug or the fixes a pull request's review asked for. Reads the committed diff, checks every acceptance criterion with evidence, and answers approve, request_changes or reject.
 allowed-tools: Read, Grep, Glob, Bash
 ---
 
@@ -8,7 +8,7 @@ allowed-tools: Read, Grep, Glob, Bash
 
 ## Inputs
 
-`args.kind`: `story` or `bug`. `args.context`: the implementation context the implementer worked from, in Portuguese. `args.criteria`: the acceptance criteria, one per line. `inputs.work`: the implementer's report. `worktree` in the context is the implementer's worktree; `worktree_base` the ref it forked from.
+`args.kind`: `story`, `bug` or `fix-pr`. `args.context`: the implementation context the implementer worked from, in Portuguese. `args.criteria`: the acceptance criteria, one per line. `inputs.work`: the implementer's report. `worktree` in the context is the implementer's worktree; `worktree_base` the ref it forked from.
 
 ## Procedure
 
@@ -19,7 +19,7 @@ You have no stake in this change. Review it as if a colleague you never met subm
 3. Judge in this order:
    1. **Correctness**: does the change do what the work item asks? Walk the logic in the diff.
    2. **Acceptance criteria**: every line of `args.criteria`, one by one, pass or fail with evidence.
-   3. **Story:** every Task of the context is implemented, none skipped or half done. **Bug:** the regression test fails without the fix and for the reported reason; the fix is at the root cause, not where the symptom shows.
+   3. **Story:** every Task of the context is implemented, none skipped or half done. **Bug:** the regression test fails without the fix and for the reported reason; the fix is at the root cause, not where the symptom shows. **fix-pr:** `worktree_base` is the pull request's branch as it was, so the diff is only the fixes; each criterion is one review comment, and it passes when the code now does what the comment asks, or when the report's `declined` gives a reason that holds. A fix that goes beyond its comment is a scope finding.
    4. **Safety**: bugs, unhandled edge cases, error paths, security (injection, missing authorization, secrets in code), data loss.
    5. **Scope**: unrelated changes, deviations the report did not declare, pieces the context required and the diff lacks.
    6. **Verification**: was the testing enough for the change's risk?

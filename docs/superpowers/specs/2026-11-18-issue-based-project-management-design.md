@@ -1,6 +1,6 @@
 # Projects: every spec-wave flow, in agent-mux — design
 
-Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, and the first part of phase 4 (§19 to §23); nothing else is.
+Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, and the first two parts of phase 4 (§19 to §24); nothing else is.
 
 **The requirement.** Any repository configured with spec-wave must open in
 agent-mux as a **Project** and work there: every flow spec-wave has, each
@@ -1210,9 +1210,62 @@ Development and Code review screens. Where the code differs from §7 and
 - **The Development screen is three groups**, not the fleet's kanban of
   §8.1: in development, ready to build, waiting on a dependency. Code
   review groups items by what their pull request waits on.
+- **Not built, the rest of phase 4:** see §24, which built the merge,
+  `fix-pr` and `metadata.project` and lists what is still left.
+
+## 24. Phase 4, second part, as built
+
+Built on 2026-11-22: `project merge` (`src/project/merge.rs`,
+`Ops::merged_board`), the `fix-pr` step (`src/project/fix_pr.rs`, the
+flow `project-fix-pr`), and `launches.metadata.project`
+(`project::ProjectLaunch`, `App.project_launch`) with
+`tracing::project_report` and `agent-mux trace project`. On the screens,
+`f` and `P`. Where the code differs from §6, §7.5 and §9.2:
+
+- **A merge takes a Feature, a Story or a Bug.** spec-wave's takes a
+  Feature only. Until the stack of §7.2 is built every Story's pull
+  request is based on the default branch, so one Story is a useful
+  queue of its own.
+- **The board after a merge** is §7.4's rule, not spec-wave's `qa`
+  command: the Story or Bug goes to QA / Todo, and the Feature follows
+  when every one of its Stories is in QA or later. spec-wave moves the
+  Feature at the first merged Story.
+- **The plan is made from the snapshot.** A Story's pull requests are the
+  ones GitHub links to its issue and, in a code repository, the ones
+  that name it. spec-wave also reads the bodies of the hub's open pull
+  requests for a stacked one GitHub does not link; that read comes with
+  the stack.
+- **No lock.** spec-wave's `merge` takes a local lock file; here each
+  pull request is read again right before it is merged, and one merged
+  meanwhile only moves the board.
+- **The trailer check is a line in the report**, written after the
+  fresh read and before the merge, for a Story only.
+- **A draft is never marked ready by agent-mux**, in the plan or on the
+  screens: a single Story's draft is marked ready by a person on GitHub.
+- **`fix-pr` is a `revise` step, not a `single`** (§6's table): the fixes
+  are reviewed by a second session against one criterion per comment
+  before anything is pushed, as a build is. It reuses the skills
+  `wf-project-build` (kind `fix-pr`) and `wf-project-review`.
+- **The session answers no comment.** spec-wave's skill pushes and
+  replies itself; here the session reports `{comment, commit, note}`
+  rows and `declined` rows, and Rust pushes, replies under each thread
+  and leaves the summary. A reported commit that is not on the branch
+  is never named to a person.
+- **What counts as open:** a review thread that is not resolved and that
+  holds no reply with the marker `<!-- agent-mux:fix-pr -->`, and the
+  body of a `CHANGES_REQUESTED` or `COMMENTED` review submitted after
+  the branch's last commit. At most 30 go to one session.
+- **`metadata.project` has no `dispatch`** (there is no fleet yet), and
+  `executor` is always `operator`. It is set for the whole process
+  (`App.project_launch`), which runs one step, and `role` is read from
+  the step's label.
+- **`trace project` has `--tree`, `--log` and `--json`**; there is no
+  timeline view. The items under a Feature come from the Project's
+  cache in the same store; with no cache the item is read alone.
 - **Not built, the rest of phase 4:** a Feature as a stack and marking
   its pull requests ready together (§7.2), a Story across repositories
-  (§7.3), a Task on its own, `project workspace|merge` (§7.5), `fix-pr`,
-  the fleet (§8), `metadata.project` on launches and what reads it
-  (§9.2, §9.3), chat, refine and estimate on an item, the `/project`
-  skill and the MCP tools.
+  (§7.3), a Task on its own, `project workspace`, the fleet (§8), the
+  item's Trace tab, the History badge, the MCP tool
+  `agent_mux_get_project_item` and the Langfuse mapping (§9.2, §9.3),
+  chat, refine and estimate on an item, the `/project` skill and the
+  other MCP tools.
