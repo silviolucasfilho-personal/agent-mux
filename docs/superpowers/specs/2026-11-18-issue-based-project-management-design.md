@@ -1,6 +1,6 @@
 # Projects: every spec-wave flow, in agent-mux — design
 
-Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, and the first five parts of phase 4 (§19 to §27); nothing else is.
+Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, and phase 4 in six parts (§19 to §28), with what each left out named there; nothing else is.
 
 **The requirement.** Any repository configured with spec-wave must open in
 agent-mux as a **Project** and work there: every flow spec-wave has, each
@@ -1424,3 +1424,63 @@ Built on 2026-11-23: refine and estimate (§9.1 T6), the chat on an item
 - **Still not built in phase 4:** `project workspace`, the fleet (§8),
   and from §9.3 the cards' tokens and cost, the Observability screen and
   Heimdall's `projects` section.
+
+## 28. Phase 4, sixth part, as built
+
+Built on 2026-11-23: `project workspace` (§13) and the fleet (§8), on
+schema v31 (`project_dispatches`).
+
+- **`project workspace map|prepare --issue <n>`** (`src/project/
+  workspace.rs`) is the port of spec-wave's command over
+  `build::repo_dir`: the slugs of the item and of everything under it,
+  the layout, a clone of what is missing under `.spec-wave/repos` only,
+  and the manifest `.spec-wave/workspace-<n>.json` with spec-wave's
+  keys. `map` is spec-wave's `--dry-run`. A clone uses the operator's
+  git credentials, never a token in the URL, and is never shallow.
+- **The lease** (`src/project/lease.rs`) is `spec-wave-agent/src/lease.rs`
+  ported rule by rule: a non-forced push to acquire, `--force-with-lease`
+  on the sha seen to renew and to steal after 600 s, `generation`, the
+  same `lease.json`, the same default prefix. It lives in a small
+  repository of its own under the runtime folder, so the operator's
+  checkout is not touched. `owner` is `<gh login>@<hostname>`.
+- **The rows and the dispatcher** (`src/project/fleet.rs`):
+  `project_dispatches` holds one row per dispatched item (`queued`,
+  `running`, `blocked`, `review`, `cancelled`); `next_actions` is pure
+  (Bugs first, then the oldest dispatch; a row whose process is gone is a
+  lost run; an item with an open pull request in code review goes to
+  Review whoever built it; a closed item is forgotten) and `settle`
+  records how a run ended.
+- **The runner is a process, not the TUI's tick.** §8.2 runs the
+  dispatcher on the tick and in `project fleet run`; only the command is
+  built (`cli::fleet_run`), one per hub and machine (a pid file). The
+  screen's `d` starts `project fleet run --once --dispatch <n>`, which
+  leaves at once when a runner is already going. A TUI that closes does
+  not stop the fleet.
+- **A run is `project run <n>`**, a process per item, so the delivery is
+  the operator's own: `pr-stack` for a Feature. The daemon's shape of
+  §8.2 (`delivery = "agent"`: one branch `agent/issue-<n>`, checkpoint
+  commits, one pull request with no closing keyword) is not built, and
+  neither are rounds within a run (`max_rounds`): a build's own
+  `max_cycles` is the only loop inside one.
+- **Outcomes** differ from RFC-008's table in one row: a run that exits
+  cleanly with no pull request is Blocked with its last line, not a
+  success. A lost lease and a lease that cannot be renewed past its TTL
+  block without counting as a failure; a lease another owner holds
+  leaves the card queued with `held by <owner>`.
+- **Fencing stops the run's process only.** §8.3 asks for a process
+  group; `session.rs` was not changed, so a harness started by the
+  stopped run may outlive it briefly.
+- **The kanban** (`app::project::kanban_rows`): three headings over the
+  Development screen's own groups, which stay as the Backlog, instead of
+  four columns side by side; `d`, `x` and `b`. A run held by another
+  machine is shown by `fleet status` (it lists every claim on the
+  remote), not on the screen. `Enter` on a card opens the item, not its
+  live session; the card names the run's output file.
+- **Sources** (§8.4): only `screen`. The queue label and the request to
+  a named agent are not built, so nothing is dispatched without the
+  operator.
+- **Settings.** `[project.fleet]` is not read: `--max-runs` and
+  `--max-failures` on `fleet run` (3 and 3).
+- **Left of phase 4:** from §9.3 the cards' tokens and cost, the
+  Observability screen and Heimdall's `projects` section; from §9.1
+  `project-insights` and agents on an item.

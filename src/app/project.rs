@@ -213,9 +213,12 @@ pub struct ProjectView {
     pub trace: Option<ItemTrace>,
     /// Where proposals (refine, estimate) wait: the CLI's scratch folder.
     pub scratch: PathBuf,
+    /// The fleet's dispatches of this hub, read from the store on the tick.
+    pub dispatches: Vec<crate::project::fleet::Dispatch>,
     /// The proposals waiting for the open item, read from `scratch`.
     pub proposals: Vec<crate::project::assist::Proposal>,
     proposals_at: Option<Instant>,
+    dispatches_at: Option<Instant>,
     pub checks: Option<Vec<Check>>,
     pub syncing_since: Option<Instant>,
     /// A dialog over the screen: a picker, a line of text, the new-item
@@ -258,8 +261,10 @@ impl ProjectView {
             scratch: crate::project::run::scratch_dir(
                 &crate::tracing::analysis::default_snapshot_dir(),
             ),
+            dispatches: Vec::new(),
             proposals: Vec::new(),
             proposals_at: None,
+            dispatches_at: None,
             checks: None,
             syncing_since: None,
             modal: None,
@@ -395,6 +400,15 @@ impl ProjectView {
             ),
             None => Vec::new(),
         };
+        if self.screen == Screen::Development {
+            self.rows = kanban_rows(
+                std::mem::take(&mut self.rows),
+                &self.dispatches,
+                self.snap.as_ref(),
+                &self.filter,
+                &self.collapsed,
+            );
+        }
         let at = keep
             .and_then(|k| self.rows.iter().position(|r| same_row(r, &k)))
             .unwrap_or_else(|| self.cursor().min(self.rows.len().saturating_sub(1)));
@@ -460,6 +474,12 @@ impl ProjectView {
             }
             None => Vec::new(),
         };
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_cursor_for_test(&mut self, at: usize) {
+        self.focus = Focus::List;
+        self.set_cursor(at);
     }
 
     /// How many rows the item screen's current tab lists.
@@ -728,6 +748,59 @@ impl ProjectView {
     }
 }
 
+/// The Development kanban (spec §8.1): the fleet's WIP, Blocked and
+/// Review columns over the screen's own rows, which are the Backlog. An
+/// item with a card is listed once, in its column.
+pub fn kanban_rows(
+    backlog: Vec<Row>,
+    dispatches: &[crate::project::fleet::Dispatch],
+    snap: Option<&Snapshot>,
+    filter: &str,
+    collapsed: &BTreeSet<String>,
+) -> Vec<Row> {
+    use crate::project::fleet::Column;
+    let Some(snap) = snap else { return backlog };
+    let mut rows = Vec::new();
+    let mut carded: Vec<u64> = Vec::new();
+    for (column, key) in [
+        (Column::Wip, "fleet:wip"),
+        (Column::Blocked, "fleet:blocked"),
+        (Column::Review, "fleet:review"),
+    ] {
+        let items: Vec<u64> = dispatches
+            .iter()
+            .filter(|d| d.column() == column)
+            .filter(|d| snap.item(d.item).is_some_and(|i| matches_filter(i, filter)))
+            .map(|d| d.item)
+            .collect();
+        if items.is_empty() {
+            continue;
+        }
+        carded.extend(&items);
+        rows.push(Row::Heading {
+            key: key.to_string(),
+            text: format!("fleet · {}", column.label()),
+            count: items.len(),
+        });
+        if !collapsed.contains(key) {
+            rows.extend(
+                items
+                    .into_iter()
+                    .map(|number| Row::Item { number, depth: 0 }),
+            );
+        }
+    }
+    if rows.is_empty() {
+        return backlog;
+    }
+    rows.extend(
+        backlog
+            .into_iter()
+            .filter(|r| !matches!(r, Row::Item { number, .. } if carded.contains(number))),
+    );
+    rows
+}
+
 /// The skill of an interactive session on a work item.
 pub const PROJECT_SKILL: &str = "project";
 
@@ -896,10 +969,14 @@ impl ProjectView {
 
     /// A verb's key. `None`: the key is not a verb here.
     fn verb_key(&mut self, c: char) -> Option<Outcome> {
-        if !matches!(
-            c,
-            'n' | 'm' | 'M' | 't' | 'R' | 'D' | 'A' | 'r' | 'f' | 'P' | 'E' | 'W' | 'c'
-        ) {
+        // the fleet's keys are the Development screen's alone
+        let fleet_key = matches!(c, 'd' | 'x' | 'b') && self.screen == Screen::Development;
+        if !fleet_key
+            && !matches!(
+                c,
+                'n' | 'm' | 'M' | 't' | 'R' | 'D' | 'A' | 'r' | 'f' | 'P' | 'E' | 'W' | 'c'
+            )
+        {
             return None;
         }
         if self.snap.is_none() {
@@ -911,6 +988,64 @@ impl ProjectView {
         let target = self.target().cloned();
         let need = |what: &str| Some(Outcome::Notice(format!("select an item to {what}")));
         match c {
+            'd' | 'x' | 'b' if fleet_key => {
+                use crate::project::fleet::State;
+                let Some(it) = target else {
+                    return need(if c == 'd' { "dispatch" } else { "take back" });
+                };
+                let n = it.number;
+                let card = self.dispatches.iter().find(|d| d.item == n);
+                let now = crate::project::now_ns();
+                if c == 'd' {
+                    if let Some(d) = card.filter(|d| d.state != State::Blocked) {
+                        return Some(Outcome::Notice(format!(
+                            "#{n} is already dispatched: {}",
+                            d.line(now)
+                        )));
+                    }
+                    self.modal = Some(Modal::Confirm {
+                        lines: vec![
+                            format!("Dispatch #{n} to the fleet?"),
+                            "Its card goes to WIP. When a slot is free, a run takes the item's lease on the hub's remote and does what `r` does: a Story's build, a Feature's stack or a Bug's fix, each reviewed before it is delivered.".into(),
+                            "A run that fails is tried again, up to three times; then the card is Blocked with the reason. `x` takes it back.".into(),
+                            "This starts the fleet's runner on this machine if none is going. Nothing is merged.".into(),
+                        ],
+                        op: Op::Process {
+                            number: n,
+                            args: vec![
+                                "fleet".into(),
+                                "run".into(),
+                                "--once".into(),
+                                "--dispatch".into(),
+                                n.to_string(),
+                            ],
+                            what: "the fleet's run".into(),
+                        },
+                    });
+                    return Some(Outcome::None);
+                }
+                let Some(d) = card else {
+                    return Some(Outcome::Notice(format!(
+                        "#{n} was not dispatched: it is in Backlog"
+                    )));
+                };
+                self.modal = Some(Modal::Confirm {
+                    lines: vec![
+                        format!("Take #{n} back to Backlog?"),
+                        format!("Now: {}", d.line(now)),
+                        if d.state == State::Running {
+                            "Its run is stopped and its lease released. What it already pushed stays.".into()
+                        } else {
+                            "No run is going for it: only the card moves.".to_string()
+                        },
+                    ],
+                    op: Op::Process {
+                        number: n,
+                        args: vec!["cancel".into(), n.to_string()],
+                        what: "the cancellation".into(),
+                    },
+                });
+            }
             'c' => {
                 let Some(it) = target else {
                     return need("talk about");
@@ -2510,6 +2645,24 @@ impl App {
             view.rebuild();
         }
         view.reload_proposals(false);
+        // the fleet's cards follow the store, at the proposals' pace
+        if view
+            .dispatches_at
+            .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(2))
+        {
+            view.dispatches_at = Some(Instant::now());
+            let fresh = self
+                .trace_db_path
+                .as_deref()
+                .filter(|p| p.is_file())
+                .and_then(|p| crate::tracing::store::open_ro(p).ok())
+                .and_then(|conn| crate::project::fleet::list(&conn, &view.hub()).ok())
+                .unwrap_or_default();
+            if fresh != view.dispatches {
+                view.dispatches = fresh;
+                view.rebuild();
+            }
+        }
         if let Some(rx) = &view.thread_rx
             && let Ok(thread) = rx.try_recv()
         {
@@ -2982,6 +3135,89 @@ mod tests {
             text.contains("Run nothing that writes before I say yes"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn the_fleets_cards_sit_over_the_backlog_and_its_keys_ask_first() {
+        use crate::project::fleet::{Dispatch, State};
+        let mut v = view();
+        v.screen = Screen::Development;
+        v.rebuild();
+        let backlog = v.rows.clone();
+        let in_backlog = items(&backlog);
+        assert!(!in_backlog.is_empty(), "the fixture has something to build");
+        let n = in_backlog[0];
+        // with nothing dispatched the screen is as it was
+        assert!(
+            !v.rows
+                .iter()
+                .any(|r| matches!(r, Row::Heading { key, .. } if key.starts_with("fleet:")))
+        );
+
+        // `d` on a backlog item asks, and the yes starts the runner with it
+        let at = v
+            .rows
+            .iter()
+            .position(|r| matches!(r, Row::Item { number, .. } if *number == n))
+            .unwrap();
+        v.set_cursor_for_test(at);
+        assert_eq!(v.handle_key(&key(KeyCode::Char('d'))), Outcome::None);
+        let Some(Modal::Confirm { lines, op }) = &v.modal else {
+            panic!("no confirmation: {:?}", v.modal)
+        };
+        assert!(
+            lines[0].contains(&format!("Dispatch #{n} to the fleet")),
+            "{lines:?}"
+        );
+        assert!(matches!(op, Op::Process { args, .. }
+            if args == &["fleet", "run", "--once", "--dispatch", &n.to_string()]));
+        v.modal = None;
+        // nothing to take back yet
+        assert!(matches!(
+            v.handle_key(&key(KeyCode::Char('x'))),
+            Outcome::Notice(m) if m.contains("in Backlog")
+        ));
+
+        // dispatched and blocked: its card leads the screen, once
+        let mut blocked = Dispatch::queued("acme/hub", n, None, 0);
+        blocked.state = State::Blocked;
+        blocked.reason = Some("3 run(s) failed".into());
+        v.dispatches = vec![blocked];
+        v.rebuild();
+        assert!(matches!(&v.rows[0], Row::Heading { key, count: 1, .. } if key == "fleet:blocked"));
+        assert_eq!(
+            v.rows[1],
+            Row::Item {
+                number: n,
+                depth: 0
+            }
+        );
+        assert_eq!(items(&v.rows).iter().filter(|x| **x == n).count(), 1);
+        v.set_cursor_for_test(1);
+        // a blocked card may be dispatched again, or taken back
+        v.handle_key(&key(KeyCode::Char('d')));
+        assert!(matches!(&v.modal, Some(Modal::Confirm { .. })));
+        v.modal = None;
+        v.handle_key(&key(KeyCode::Char('b')));
+        let Some(Modal::Confirm { lines, op }) = &v.modal else {
+            panic!("no confirmation: {:?}", v.modal)
+        };
+        assert!(lines[1].contains("blocked: 3 run(s) failed"), "{lines:?}");
+        assert!(matches!(op, Op::Process { args, .. } if args == &["cancel", &n.to_string()]));
+        v.modal = None;
+
+        // running: a second dispatch is refused, and the keys do nothing on other screens
+        v.dispatches[0].state = State::Running;
+        v.rebuild();
+        v.set_cursor_for_test(1);
+        assert!(matches!(
+            v.handle_key(&key(KeyCode::Char('d'))),
+            Outcome::Notice(m) if m.contains("already dispatched")
+        ));
+        v.screen = Screen::Backlog;
+        v.rebuild();
+        v.handle_key(&key(KeyCode::Char('d')));
+        assert!(v.modal.is_none());
     }
 
     #[test]

@@ -41,6 +41,22 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
         blocks it: marking a pull request ready is your review. Each merge is a
         merge commit, moves the item to QA, and the branches go at the end
 
+  agent-mux project workspace map|prepare --issue <n> [--json]
+        the folders of the code repositories an item changes (a Feature gathers its
+        Stories'): `map` only says where each is; `prepare` clones the ones missing
+        under the hub's .spec-wave/repos and writes .spec-wave/workspace-<n>.json
+  agent-mux project dispatch <n> [--harness H]
+        hand an item to the fleet: its card goes to WIP and a run starts when a
+        slot is free and `project fleet run` is going
+  agent-mux project cancel <n>
+        take a dispatched item back to Backlog; a run in progress is stopped
+  agent-mux project fleet status [--json]
+        the slots, each dispatched item's card, and who holds which item (the
+        claims on the hub's remote, this machine's and anyone else's)
+  agent-mux project fleet run [--once] [--dispatch <n>] [--max-runs N] [--max-failures N] [--poll SECONDS]
+        run the dispatched items, at most N at a time (3), each as `project run <n>`
+        under a lease on the hub's remote; --once ends when nothing is left to run
+
   agent-mux project estimate <n> [--yes] [--discard] [--harness H] [--dry-run]
         a read-only session proposes the item's effort in story points, fitted to
         the board's `Story Points` options; --yes writes the proposal that is
@@ -97,6 +113,11 @@ const VALUE_FLAGS: &[&str] = &[
     "--step",
     "--harness",
     "--critic",
+    "--issue",
+    "--max-runs",
+    "--max-failures",
+    "--dispatch",
+    "--poll",
 ];
 
 struct Args {
@@ -353,6 +374,10 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
         Some("advance") => cmd_advance(&a),
         Some("merge") => cmd_merge(&a),
         Some("run") => cmd_run(&a).await,
+        Some("workspace") => cmd_workspace(&a),
+        Some("dispatch") => cmd_dispatch(&a),
+        Some("cancel") => cmd_cancel(&a),
+        Some("fleet") => cmd_fleet(&a),
         Some("estimate") => cmd_assist(&a, super::assist::Kind::Estimate).await,
         Some("refine") => cmd_assist(&a, super::assist::Kind::Refine).await,
         None | Some("help") | Some("--help") | Some("-h") => {
@@ -536,6 +561,539 @@ fn cmd_merge(a: &Args) -> anyhow::Result<()> {
         anyhow::bail!(why);
     }
     Ok(())
+}
+
+/// `project workspace map|prepare --issue <n> [--json]`.
+fn cmd_workspace(a: &Args) -> anyhow::Result<()> {
+    use super::workspace;
+    let action = a.positional.first().map(String::as_str).unwrap_or("");
+    if !matches!(action, "map" | "prepare") {
+        anyhow::bail!("usage: agent-mux project workspace map|prepare --issue <n> [--json]");
+    }
+    let raw = a
+        .value("--issue")
+        .or_else(|| a.positional.get(1).map(String::as_str))
+        .ok_or_else(|| anyhow::anyhow!("which issue? `--issue <n>`"))?;
+    let n: u64 = raw
+        .trim_start_matches('#')
+        .parse()
+        .map_err(|_| anyhow::anyhow!("\"{raw}\" is not an issue number"))?;
+    let e = env(a)?;
+    let s = snap(&e)?;
+    let item = s
+        .item(n)
+        .ok_or_else(|| anyhow::anyhow!("issue #{n} is not in the Project"))?;
+    let hub_root = steps::hub_root(&e.cfg).map_err(|x| anyhow::anyhow!(x))?;
+    let mut layout = workspace::layout(&hub_root, &e.cfg, &workspace::slugs(item, &s));
+    let mut cloned = Vec::new();
+    if action == "prepare" {
+        if !layout.unknown.is_empty() {
+            anyhow::bail!(
+                "#{n} names repositories the hub does not list: {}. Add them to `repositories[]` of its .spec-wave.json (spec-wave's CLI does it)",
+                layout.unknown.join(", ")
+            );
+        }
+        let (done, missing) = workspace::prepare(&mut layout, &workspace::git_clone)
+            .map_err(|x| anyhow::anyhow!(x))?;
+        cloned = done;
+        let at = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        let file = workspace::write_manifest(&layout, n, &at).map_err(|x| anyhow::anyhow!(x))?;
+        if !a.flag("--json") {
+            println!("wrote {}", file.display());
+            if !missing.is_empty() {
+                println!(
+                    "! missing and not cloned (your own folders): {}",
+                    missing.join(", ")
+                );
+            }
+        }
+    }
+    if a.flag("--json") {
+        let mut v = serde_json::to_value(&layout)?;
+        v["issue"] = json!(n);
+        v["cloned"] = json!(cloned);
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    println!("#{n} {}", item.title);
+    for line in workspace::lines(&layout, &cloned) {
+        println!("  {line}");
+    }
+    Ok(())
+}
+
+/// The runtime folder of the fleet's runner: its pid file and the runs'
+/// output.
+fn fleet_runtime() -> PathBuf {
+    crate::tracing::analysis::default_snapshot_dir()
+}
+
+fn fleet_name(hub: &str) -> String {
+    let slug: String = hub
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    format!("project-fleet-{slug}")
+}
+
+/// `project dispatch <n> [--harness H]`.
+fn cmd_dispatch(a: &Args) -> anyhow::Result<()> {
+    use super::fleet;
+    let e = env(a)?;
+    let n = number(a)?;
+    let harness = match a.value("--harness") {
+        Some(h) => Some(harness_of(Some(h), Harness::Claude).map_err(|x| anyhow::anyhow!(x))?),
+        None => None,
+    };
+    let s = snap(&e)?;
+    let d = fleet::dispatch(&e.conn, &s, n, harness.map(|h| h.as_str()), super::now_ns())
+        .map_err(|x| anyhow::anyhow!(x))?;
+    println!(
+        "#{n}: dispatched to the fleet ({})",
+        d.line(super::now_ns())
+    );
+    if crate::factory::intake::holder(&fleet_runtime(), &fleet_name(&s.hub)).is_none() {
+        println!(
+            "  no runner is going for {}: start one with `agent-mux project fleet run`",
+            s.hub
+        );
+    }
+    Ok(())
+}
+
+/// `project cancel <n>`.
+fn cmd_cancel(a: &Args) -> anyhow::Result<()> {
+    use super::fleet;
+    let e = env(a)?;
+    let n = number(a)?;
+    let hub = e.cfg.hub_repo().slug();
+    let running =
+        fleet::cancel(&e.conn, &hub, n, super::now_ns()).map_err(|x| anyhow::anyhow!(x))?;
+    if !running {
+        println!("#{n}: back in Backlog");
+        return Ok(());
+    }
+    if crate::factory::intake::holder(&fleet_runtime(), &fleet_name(&hub)).is_some() {
+        println!("#{n}: its run is being stopped; the card returns to Backlog when it has");
+    } else {
+        // no runner is there to stop it: the row is all that is left
+        fleet::remove(&e.conn, &hub, n).map_err(|x| anyhow::anyhow!(x))?;
+        println!(
+            "#{n}: back in Backlog (no runner was going; a claim it left on the remote expires on its own)"
+        );
+    }
+    Ok(())
+}
+
+/// The repository that holds the claims of `cfg`'s hub.
+fn lease_repo(cfg: &ProjectConfig) -> Result<super::lease::LeaseRepo, String> {
+    let hub_root = steps::hub_root(cfg)?;
+    let url = super::build::git(&hub_root, &["remote", "get-url", "origin"])?;
+    super::lease::LeaseRepo::open(
+        fleet_runtime()
+            .join("project-leases")
+            .join(fleet_name(&cfg.hub_repo().slug())),
+        url.trim(),
+        super::lease::DEFAULT_PREFIX,
+    )
+}
+
+/// `project fleet status|run`.
+fn cmd_fleet(a: &Args) -> anyhow::Result<()> {
+    use super::fleet;
+    let max_runs: usize = match a.value("--max-runs") {
+        Some(v) => v
+            .parse()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| anyhow::anyhow!("--max-runs takes a number above zero"))?,
+        None => fleet::MAX_RUNS,
+    };
+    match a.positional.first().map(String::as_str) {
+        Some("status") => {
+            let e = env(a)?;
+            let hub = e.cfg.hub_repo().slug();
+            let s = store::load(&e.conn, &hub).ok().flatten();
+            let ds = fleet::list(&e.conn, &hub).map_err(|x| anyhow::anyhow!(x))?;
+            let now = super::now_ns();
+            // who holds what on the remote: this machine's runs and anyone else's
+            let claims = lease_repo(&e.cfg).and_then(|r| r.list());
+            if a.flag("--json") {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "hub": hub,
+                        "max_runs": max_runs,
+                        "runner": crate::factory::intake::holder(&fleet_runtime(), &fleet_name(&hub)),
+                        "dispatches": ds,
+                        "claims": claims.as_ref().ok(),
+                        "claims_error": claims.as_ref().err(),
+                    }))?
+                );
+                return Ok(());
+            }
+            println!("fleet of {hub}");
+            println!(
+                "  runner: {}",
+                match crate::factory::intake::holder(&fleet_runtime(), &fleet_name(&hub)) {
+                    Some(pid) => format!("going (pid {pid})"),
+                    None => "not going: `agent-mux project fleet run` starts it".to_string(),
+                }
+            );
+            for line in fleet::status_lines(&ds, s.as_ref(), max_runs, now) {
+                println!("  {line}");
+            }
+            match claims {
+                Ok(list) if list.is_empty() => println!("  claims on the remote: none"),
+                Ok(list) => {
+                    println!("  claims on the remote:");
+                    for l in list {
+                        let beat = l.heartbeat_ns();
+                        println!(
+                            "    #{} held by {} (generation {}){}",
+                            l.issue,
+                            l.owner,
+                            l.generation,
+                            if super::lease::is_expired(beat, now, super::lease::TTL_SECS) {
+                                " · no heartbeat past the TTL: it may be taken"
+                            } else {
+                                ""
+                            }
+                        );
+                    }
+                }
+                Err(err) => println!("  ! the claims were not read: {err}"),
+            }
+            Ok(())
+        }
+        Some("run") => {
+            let max_failures: u32 =
+                match a.value("--max-failures") {
+                    Some(v) => v.parse().ok().filter(|n| *n > 0).ok_or_else(|| {
+                        anyhow::anyhow!("--max-failures takes a number above zero")
+                    })?,
+                    None => fleet::MAX_FAILURES,
+                };
+            let poll: u64 = match a.value("--poll") {
+                Some(v) => v
+                    .parse()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| anyhow::anyhow!("--poll takes seconds above zero"))?,
+                None => 5,
+            };
+            fleet_run(a, max_runs, max_failures, poll)
+        }
+        _ => anyhow::bail!("usage: agent-mux project fleet status|run"),
+    }
+}
+
+/// One run the runner holds.
+struct FleetRun {
+    item: u64,
+    child: std::process::Child,
+    lease: super::lease::Lease,
+    renewed: std::time::Instant,
+    log: PathBuf,
+}
+
+/// The last line of a run's output that says why it ended.
+fn last_word(log: &Path) -> String {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|l| l.chars().take(300).collect())
+        .unwrap_or_default()
+}
+
+/// The runner: starts what the dispatcher says, keeps each run's lease
+/// beating, and records how each ended. One runner per hub on a machine.
+fn fleet_run(a: &Args, max_runs: usize, max_failures: u32, poll: u64) -> anyhow::Result<()> {
+    use super::{fleet, lease};
+    use crate::factory::intake;
+    let mut e = env(a)?;
+    let hub = e.cfg.hub_repo().slug();
+    let root = e.cfg.root().to_path_buf();
+    let runtime = fleet_runtime();
+    // a dispatch given with the command is queued first, runner or not
+    if let Some(raw) = a.value("--dispatch") {
+        let n: u64 = raw
+            .trim_start_matches('#')
+            .parse()
+            .map_err(|_| anyhow::anyhow!("\"{raw}\" is not an issue number"))?;
+        let s = snap(&e)?;
+        let d = fleet::dispatch(&e.conn, &s, n, a.value("--harness"), super::now_ns())
+            .map_err(|x| anyhow::anyhow!(x))?;
+        println!(
+            "#{n}: dispatched to the fleet ({})",
+            d.line(super::now_ns())
+        );
+    }
+    let Some(_held) = intake::hold(&runtime, &fleet_name(&hub)) else {
+        println!("a runner is already going for {hub}: it picks up what is queued");
+        return Ok(());
+    };
+    let leases = lease_repo(&e.cfg).map_err(|x| anyhow::anyhow!(x))?;
+    let login = super::github::login(&e.tools, &root).map_err(|x| anyhow::anyhow!(x))?;
+    let owner = lease::owner(login.trim());
+    // `AGENT_MUX_PROJECT_EXE` names a stand-in for this binary, for tests
+    let exe = match std::env::var_os("AGENT_MUX_PROJECT_EXE") {
+        Some(p) => PathBuf::from(p),
+        None => std::env::current_exe()?,
+    };
+    let logs = runtime.join("project-fleet");
+    std::fs::create_dir_all(&logs)?;
+    println!("fleet of {hub}: up to {max_runs} run(s) at once, as {owner}");
+    let once = a.flag("--once");
+    let mut runs: Vec<FleetRun> = Vec::new();
+    loop {
+        let now = super::now_ns();
+        // 1. runs that ended, and runs the operator cancelled
+        let mut i = 0;
+        while i < runs.len() {
+            let cancelled = fleet::get(&e.conn, &hub, runs[i].item)
+                .ok()
+                .flatten()
+                .is_none_or(|d| d.state == fleet::State::Cancelled);
+            if cancelled {
+                let mut r = runs.remove(i);
+                let _ = r.child.kill();
+                let _ = r.child.wait();
+                leases.release(r.item);
+                let _ = fleet::remove(&e.conn, &hub, r.item);
+                println!("#{}: cancelled; its run was stopped", r.item);
+                continue;
+            }
+            match runs[i].child.try_wait() {
+                Ok(Some(status)) => {
+                    let r = runs.remove(i);
+                    leases.release(r.item);
+                    // what GitHub says now decides whether it delivered
+                    let fresh = refresh_touched(&e.conn, &e.tools, &e.cfg, &[r.item])
+                        .ok()
+                        .flatten();
+                    let pr = fresh
+                        .as_ref()
+                        .and_then(|s| s.item(r.item))
+                        .and_then(|it| it.pulls.iter().find(|p| p.open()).map(|p| p.url.clone()));
+                    if let Ok(Some(mut d)) = fleet::get(&e.conn, &hub, r.item) {
+                        fleet::settle(
+                            &mut d,
+                            status.success(),
+                            pr,
+                            &last_word(&r.log),
+                            max_failures,
+                            now,
+                        );
+                        let _ = fleet::save(&e.conn, &d);
+                        println!("#{}: {}", r.item, d.line(now));
+                    }
+                }
+                Ok(None) => i += 1,
+                Err(err) => {
+                    eprintln!("#{}: its run could not be watched: {err}", runs[i].item);
+                    i += 1;
+                }
+            }
+        }
+        // 2. the leases: a heartbeat, or fencing when one was lost
+        let mut i = 0;
+        while i < runs.len() {
+            if runs[i].renewed.elapsed().as_secs() < lease::HEARTBEAT_SECS as u64 {
+                i += 1;
+                continue;
+            }
+            let mut held = runs[i].lease.clone();
+            match leases.renew(&mut held, now) {
+                Ok(()) => {
+                    runs[i].lease = held;
+                    runs[i].renewed = std::time::Instant::now();
+                    if let Ok(Some(mut d)) = fleet::get(&e.conn, &hub, runs[i].item) {
+                        d.heartbeat_ns = Some(now);
+                        d.updated_ns = now;
+                        let _ = fleet::save(&e.conn, &d);
+                    }
+                    i += 1;
+                }
+                Err(lease::RenewError::Lost(why)) => {
+                    // fencing: the run stops at once and nothing is released or pushed
+                    let mut r = runs.remove(i);
+                    let _ = r.child.kill();
+                    let _ = r.child.wait();
+                    if let Ok(Some(mut d)) = fleet::get(&e.conn, &hub, r.item) {
+                        fleet::block(
+                            &mut d,
+                            &format!("the lease was lost ({why}): the run was stopped"),
+                            now,
+                        );
+                        let _ = fleet::save(&e.conn, &d);
+                    }
+                    println!(
+                        "#{}: the lease was lost ({why}); its run was stopped",
+                        r.item
+                    );
+                }
+                Err(lease::RenewError::Transient(why)) => {
+                    eprintln!(
+                        "#{}: the lease was not renewed, trying again: {why}",
+                        runs[i].item
+                    );
+                    // past the TTL with no renewal another machine may hold it: stop
+                    let stale =
+                        lease::is_expired(runs[i].lease.heartbeat_ns(), now, lease::TTL_SECS);
+                    if stale {
+                        let mut r = runs.remove(i);
+                        let _ = r.child.kill();
+                        let _ = r.child.wait();
+                        if let Ok(Some(mut d)) = fleet::get(&e.conn, &hub, r.item) {
+                            fleet::block(
+                                &mut d,
+                                "the lease could not be renewed past its TTL: the run was stopped",
+                                now,
+                            );
+                            let _ = fleet::save(&e.conn, &d);
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+        }
+        // 3. what the dispatcher says
+        e.fresh = Fresh::Auto;
+        let s = snap(&e)?;
+        let ds = fleet::list(&e.conn, &hub).map_err(|x| anyhow::anyhow!(x))?;
+        let mine: Vec<u64> = runs.iter().map(|r| r.item).collect();
+        let cards = fleet::cards(&ds, &s, |_| false)
+            .into_iter()
+            .map(|mut c| {
+                c.alive = mine.contains(&c.item);
+                c
+            })
+            .collect::<Vec<_>>();
+        let mut started = false;
+        for action in fleet::next_actions(&cards, max_runs) {
+            let now = super::now_ns();
+            match action {
+                fleet::Action::Forget(n) | fleet::Action::Cancelled(n) => {
+                    let _ = fleet::remove(&e.conn, &hub, n);
+                    println!("#{n}: back in Backlog");
+                }
+                fleet::Action::Review { item, url } => {
+                    if let Ok(Some(mut d)) = fleet::get(&e.conn, &hub, item) {
+                        fleet::settle(&mut d, true, Some(url), "", max_failures, now);
+                        let _ = fleet::save(&e.conn, &d);
+                        println!("#{item}: {}", d.line(now));
+                    }
+                }
+                fleet::Action::Lost(n) => {
+                    if let Ok(Some(mut d)) = fleet::get(&e.conn, &hub, n) {
+                        fleet::settle(
+                            &mut d,
+                            false,
+                            None,
+                            "its runner stopped before the run ended",
+                            max_failures,
+                            now,
+                        );
+                        let _ = fleet::save(&e.conn, &d);
+                        println!("#{n}: {}", d.line(now));
+                    }
+                }
+                fleet::Action::Start(n) => {
+                    let Ok(Some(mut d)) = fleet::get(&e.conn, &hub, n) else {
+                        continue;
+                    };
+                    let held = match leases.try_acquire(n, &owner, lease::TTL_SECS, now) {
+                        Ok(Some(l)) => l,
+                        Ok(None) => {
+                            let who = leases
+                                .fetch(n)
+                                .ok()
+                                .flatten()
+                                .map(|(_, l)| l.owner)
+                                .unwrap_or_else(|| "another machine".into());
+                            d.reason = Some(format!("held by {who}"));
+                            d.updated_ns = now;
+                            let _ = fleet::save(&e.conn, &d);
+                            continue;
+                        }
+                        Err(why) => {
+                            fleet::block(
+                                &mut d,
+                                &format!("the lease could not be taken: {why}"),
+                                now,
+                            );
+                            let _ = fleet::save(&e.conn, &d);
+                            println!("#{n}: {}", d.line(now));
+                            continue;
+                        }
+                    };
+                    let log = logs.join(format!("{}-{n}-{now}.log", fleet_name(&hub)));
+                    let out = std::fs::File::create(&log)?;
+                    let err = out.try_clone()?;
+                    let mut cmd = std::process::Command::new(&exe);
+                    cmd.args(["project", "run", &n.to_string(), "--dir"])
+                        .arg(&root)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(out)
+                        .stderr(err);
+                    if let Some(h) = &d.harness {
+                        cmd.args(["--harness", h]);
+                    }
+                    match cmd.spawn() {
+                        Ok(child) => {
+                            d.state = fleet::State::Running;
+                            d.pid = Some(child.id());
+                            d.started_ns = Some(now);
+                            d.ended_ns = None;
+                            d.heartbeat_ns = Some(now);
+                            d.owner = Some(held.owner.clone());
+                            d.generation = Some(held.generation);
+                            d.reason = None;
+                            d.log = Some(log.to_string_lossy().into_owned());
+                            d.updated_ns = now;
+                            let _ = fleet::save(&e.conn, &d);
+                            println!("#{n}: started (output in {})", log.display());
+                            runs.push(FleetRun {
+                                item: n,
+                                child,
+                                lease: held,
+                                renewed: std::time::Instant::now(),
+                                log,
+                            });
+                            started = true;
+                        }
+                        Err(why) => {
+                            leases.release(n);
+                            fleet::block(
+                                &mut d,
+                                &format!("the run could not be started: {why}"),
+                                now,
+                            );
+                            let _ = fleet::save(&e.conn, &d);
+                            println!("#{n}: {}", d.line(now));
+                        }
+                    }
+                }
+            }
+        }
+        if once && runs.is_empty() && !started {
+            println!("nothing is left to run");
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(if runs.is_empty() {
+            poll
+        } else {
+            poll.min(2)
+        }));
+    }
 }
 
 /// `project estimate|refine <n> [--yes] [--discard] [--harness H] [--json]`:

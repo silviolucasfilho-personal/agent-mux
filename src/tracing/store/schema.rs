@@ -1,11 +1,11 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 30;
+pub const SCHEMA_VERSION: i32 = 31;
 
 pub const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
-    V22, V23, V24, V25, V26, V27, V28, V29, V30,
+    V22, V23, V24, V25, V26, V27, V28, V29, V30, V31,
 ];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
@@ -1598,5 +1598,33 @@ CREATE TABLE IF NOT EXISTS project_boards (
   hub        TEXT PRIMARY KEY,
   data       TEXT NOT NULL,
   synced_ns  INTEGER NOT NULL
+);
+"#;
+
+// v31: the Project fleet (`src/project/fleet.rs`, Projects spec §8). One
+// row per work item the operator dispatched: where its card is on the
+// Development kanban and what its run is doing. An item with no row is in
+// Backlog. The lease that says who holds an item is not here: it lives in
+// git, on the hub's remote (`project::lease`).
+const V31: &str = r#"
+CREATE TABLE IF NOT EXISTS project_dispatches (
+  hub          TEXT NOT NULL,
+  item         INTEGER NOT NULL,
+  state        TEXT NOT NULL,
+  target       TEXT NOT NULL DEFAULT 'fleet',
+  harness      TEXT,
+  queued_ns    INTEGER NOT NULL,
+  started_ns   INTEGER,
+  ended_ns     INTEGER,
+  failures     INTEGER NOT NULL DEFAULT 0,
+  reason       TEXT,
+  pid          INTEGER,
+  owner        TEXT,
+  generation   INTEGER,
+  heartbeat_ns INTEGER,
+  pr_url       TEXT,
+  log          TEXT,
+  updated_ns   INTEGER NOT NULL,
+  PRIMARY KEY (hub, item)
 );
 "#;
