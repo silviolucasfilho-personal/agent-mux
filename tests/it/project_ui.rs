@@ -252,7 +252,8 @@ fn a_spec_wave_repository_opens_reads_and_draws() {
     f.app.handle_project_key(&key(KeyCode::Esc));
 
     // Health: the checklist, with what could not be checked said so
-    for _ in 0..6 {
+    // (the last screen, after Observability)
+    for _ in 0..7 {
         f.app.handle_project_key(&key(KeyCode::Char(']')));
     }
     assert_eq!(view(&f.app).screen, Screen::Health);

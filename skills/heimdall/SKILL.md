@@ -49,6 +49,7 @@ Deep procedures, thresholds and report shapes live next to this file: `reference
 2. Only when the user asks about another workspace or an older window: `agent_mux_get_briefing` with `since`/`until`, or `trace briefing --all-workspaces --json`.
 3. For a session requiring drill-down timeline detail: `agent_mux_get_timeline` (or `trace show <session-key> --json`).
 3b. The `swarms` section (`data.swarms`) lists the workspace's swarms of the window: report each as one line (goal, status, tasks done/total, launches, tokens, cost, what needs the operator) under the sessions, and group a swarm's sessions (`launch_id` among the swarm's launches) under it rather than listing them apart. Drill into one only when asked: `agent_mux_get_swarm` (or `trace swarm <id> --json`).
+3c. The `projects` section (`data.projects`) has a card when the workspace is a spec-wave repository: report it as one short block after the swarms (runs by kind of step, sessions and how many are going, items by number, tokens and cost, the fleet's WIP/Blocked/Review counts) and name every line of `blocked`, since each waits on the operator. Drill into one item only when asked: `agent_mux_get_project_item` (or `trace project <n> --json`).
 4. Report per session: **Goal** (first user prompt), **Now** (open turn or open observation, its tool and target), **Done** (turns, tool calls by name, files touched, commands run), **Last output** (one or two sentences), **Cost** (tokens, USD, duration). Follow `reference/sessions.md`.
 
 ## Playbook B — evaluate skills

@@ -1,6 +1,6 @@
 # Projects: every spec-wave flow, in agent-mux — design
 
-Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, and phase 4 in eight parts (§19 to §30), with what each left out named there; nothing else is.
+Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, and phase 4 in nine parts (§19 to §31), with what each left out named there; phases 5 and 6 are not.
 
 **The requirement.** Any repository configured with spec-wave must open in
 agent-mux as a **Project** and work there: every flow spec-wave has, each
@@ -1567,3 +1567,39 @@ Built on 2026-11-23: insights (§9.1 T6) and an agent on an item (T7).
 - **Left of phase 4**, all from §9.3: tokens and cost on the cards, the
   Observability screen, Heimdall's `projects` section, and the timeline
   view of `trace project`.
+
+## 31. Phase 4, ninth part, as built
+
+Built on 2026-11-23: the rest of §9.3, all read-only and all over
+`tracing::project_report`, which gained `hub_launches`, `hubs_since`,
+`Totals`, `item_totals`, `card_line`, `observability_lines` and
+`timeline_lines`.
+
+- **Cards.** An item's card ends with a `Sessions:` line: its own
+  sessions, tokens, cost and running time, and for an item with children
+  the total with what is under it (`item_totals` rolls a session up
+  every ancestor the snapshot knows). On the screens it is read on the
+  tick, at most every ten seconds (`ProjectView.totals`); `project show`
+  reads it once. A milestone's row does not sum its Features yet.
+- **The Observability screen** (`Screen::Observability`, before Health):
+  a screen with no rows whose pane is `observability_lines`, in two
+  tabs, the last 30 days and ever: the totals, the sessions going now,
+  the cost by step (an `agent:<name>` or `insights:<scope>` step counts
+  under its kind), by harness, by milestone, by executor and by item,
+  and the sessions that had tool errors. Not built from §9.3's list:
+  cost by model (the report adds up launches, and a model is a turn's),
+  critique attempts per document, the last failures with their reason
+  (the fleet's Blocked cards carry theirs on the Development screen),
+  and the time from Ready to Review.
+- **`trace project <n> --timeline`**: one row a session on one time axis
+  60 columns wide. It is text, not the Swarm screen's zoomable lanes.
+- **Heimdall** (`dossier::ProjectDossier`, `ProjectCard`,
+  `project_card`): the `projects` section holds the card of the
+  workspace's own Project when the folder is a spec-wave repository;
+  §9.3's "items moved" and "gates waiting" are not in it, since they are
+  facts of GitHub and the dossier reads none. It carries the fleet's
+  counts and the reasons of its Blocked cards instead.
+  `agent_mux_get_briefing` answers the same dossier.
+- **Phase 4 is built** as §19 to §31 describe, each naming what it left
+  out. Phase 5 (QA, milestones' audit and trail) and phase 6 (`project
+  init`, the web pages) are not started.

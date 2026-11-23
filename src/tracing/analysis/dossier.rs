@@ -32,6 +32,10 @@ pub struct HeimdallDossier {
     /// design §7.1): live ones and those that ended within it.
     #[serde(default)]
     pub swarms: DossierSection<SwarmDossier>,
+    /// The workspace's Project (a spec-wave repository), when it is one:
+    /// what its steps ran in the session window (Projects spec §9.3).
+    #[serde(default)]
+    pub projects: DossierSection<ProjectDossier>,
 }
 
 /// Scope definition of the dossier.
@@ -71,6 +75,8 @@ pub struct DossierHealth {
     pub agents_build_ms: u64,
     #[serde(default)]
     pub swarms_build_ms: u64,
+    #[serde(default)]
+    pub projects_build_ms: u64,
     pub bytes: usize,
     pub max_session_cards: usize,
     pub max_skill_rows: usize,
@@ -177,6 +183,130 @@ pub struct SwarmCard {
     pub needs: Vec<String>,
     /// The Langfuse session every turn of the swarm is in (`session.id`).
     pub langfuse_session: String,
+}
+
+/// The Projects of the window: one card per hub.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectDossier {
+    pub projects: Vec<ProjectCard>,
+    pub total_projects: usize,
+}
+
+/// One Project as the briefing tells it: what its steps ran in the
+/// window, from `launches.metadata.project` (`tracing::project_report`),
+/// and where the fleet's cards are now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectCard {
+    /// The hub, `owner/repo`.
+    pub hub: String,
+    /// Runs of a step in the window (a build, a critique, an estimate…).
+    pub runs: usize,
+    pub sessions: usize,
+    /// Sessions still going.
+    pub going: usize,
+    /// Work items a step ran for.
+    pub items: Vec<u64>,
+    /// Runs per step kind, most first: `build`, `fix-pr`, `spec`, …
+    pub steps: Vec<ProjectStepCount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// Part of the cost is unpriced: `cost_usd` is a floor.
+    pub unpriced: bool,
+    /// Sessions that had a tool error.
+    pub sessions_with_errors: usize,
+    /// The fleet's cards now: in WIP, Blocked and Review.
+    pub fleet_wip: usize,
+    pub fleet_blocked: usize,
+    pub fleet_review: usize,
+    /// Why each Blocked card is blocked, one line each.
+    pub blocked: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectStepCount {
+    pub step: String,
+    pub runs: usize,
+}
+
+/// The card of `hub` for the launches since `since_ns`. `None` when its
+/// steps ran nothing in the window and the fleet holds none of its items.
+pub fn project_card(
+    conn: &Connection,
+    hub: &str,
+    since_ns: i64,
+) -> rusqlite::Result<Option<ProjectCard>> {
+    use crate::project::fleet;
+    use crate::tracing::project_report as pr;
+    let launches = pr::hub_launches(conn, hub, since_ns)?;
+    let dispatches = fleet::list(conn, hub).unwrap_or_default();
+    if launches.is_empty() && dispatches.is_empty() {
+        return Ok(None);
+    }
+    let report = pr::ProjectReport {
+        hub: hub.to_string(),
+        item: 0,
+        items: Vec::new(),
+        tokens: None,
+        cost_usd: None,
+        unpriced: false,
+        launches,
+    };
+    let runs = pr::runs(&report);
+    let mut steps: Vec<ProjectStepCount> = Vec::new();
+    for r in &runs {
+        let kind = r.step.split(':').next().unwrap_or("").to_string();
+        match steps.iter_mut().find(|s| s.step == kind) {
+            Some(s) => s.runs += 1,
+            None => steps.push(ProjectStepCount {
+                step: kind,
+                runs: 1,
+            }),
+        }
+    }
+    steps.sort_by(|a, b| b.runs.cmp(&a.runs).then(a.step.cmp(&b.step)));
+    let mut items: Vec<u64> = report
+        .launches
+        .iter()
+        .map(|l| l.project.item)
+        .filter(|n| *n != 0)
+        .collect();
+    items.sort_unstable();
+    items.dedup();
+    let tokens: i64 = report.launches.iter().filter_map(|l| l.tokens).sum();
+    let cost: f64 = report.launches.iter().filter_map(|l| l.cost_usd).sum();
+    let in_column = |c: fleet::Column| dispatches.iter().filter(|d| d.column() == c).count();
+    Ok(Some(ProjectCard {
+        hub: hub.to_string(),
+        runs: runs.len(),
+        sessions: report.launches.len(),
+        going: report
+            .launches
+            .iter()
+            .filter(|l| l.ended_ns.is_none())
+            .count(),
+        items,
+        steps,
+        tokens: (tokens > 0).then_some(tokens),
+        cost_usd: (cost > 0.0).then_some(cost),
+        unpriced: report.launches.iter().any(|l| l.unpriced),
+        sessions_with_errors: report.launches.iter().filter(|l| l.errors > 0).count(),
+        fleet_wip: in_column(fleet::Column::Wip),
+        fleet_blocked: in_column(fleet::Column::Blocked),
+        fleet_review: in_column(fleet::Column::Review),
+        blocked: dispatches
+            .iter()
+            .filter(|d| d.state == fleet::State::Blocked)
+            .map(|d| {
+                format!(
+                    "#{}: {}",
+                    d.item,
+                    d.reason.as_deref().unwrap_or("no reason was recorded")
+                )
+            })
+            .collect(),
+    }))
 }
 
 /// Limits and timing configuration for dossier building.
@@ -480,6 +610,19 @@ pub fn finalize_dossier(
                 return Ok(dossier);
             }
         }
+        if !dossier.projects.data.projects.is_empty() {
+            dossier.projects.data.projects.pop();
+            dossier.projects.truncated = true;
+            dossier.projects.status = CoverageStatus::Partial;
+            let warn = "Project cards omitted to fit byte limit".to_string();
+            if !dossier.projects.warnings.contains(&warn) {
+                dossier.projects.warnings.push(warn);
+            }
+            removed = true;
+            if sync_serialized_bytes(&mut dossier)? <= config.max_bytes {
+                return Ok(dossier);
+            }
+        }
         if !dossier.swarms.data.swarms.is_empty() {
             dossier.swarms.data.swarms.pop();
             dossier.swarms.truncated = true;
@@ -728,6 +871,28 @@ pub fn build_dossier(
         ))
     });
 
+    // 7c. Build Projects section (Projects spec §9.3): the workspace's
+    // Project, when the folder is a spec-wave repository
+    let (projects_section, projects_ms) = orchestrate_section(|| {
+        let mut cards = Vec::new();
+        if let Ok(cfg) = crate::project::config::load(inputs.workspace)
+            && let Some(card) = project_card(inputs.conn, &cfg.hub_repo().slug(), session_since_ns)
+                .map_err(AnalysisError::Sqlite)?
+        {
+            cards.push(card);
+        }
+        let total = cards.len();
+        Ok((
+            ProjectDossier {
+                projects: cards,
+                total_projects: total,
+            },
+            total,
+            Vec::new(),
+            false,
+        ))
+    });
+
     // Explicitly drop progress handler guard before health queries
     drop(guard);
 
@@ -771,6 +936,7 @@ pub fn build_dossier(
         skills_build_ms: skills_ms,
         agents_build_ms: agents_ms,
         swarms_build_ms: swarms_ms,
+        projects_build_ms: projects_ms,
         bytes: 0,
         max_session_cards: config.max_session_cards,
         max_skill_rows: config.max_skill_rows,
@@ -791,6 +957,7 @@ pub fn build_dossier(
         skills: skills_section,
         agents: agents_section,
         swarms: swarms_section,
+        projects: projects_section,
     };
 
     finalize_dossier(dossier, &config)
@@ -798,6 +965,59 @@ pub fn build_dossier(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_projects_card_counts_its_runs_and_the_fleets_cards() {
+        use crate::project::fleet::{self, Dispatch, State};
+        use crate::tracing::project_report::tests::{launch_row, tag};
+        use crate::tracing::store::model::StoreOp;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("traces.db");
+        let mut store =
+            crate::tracing::store::open_rw(&db, crate::tracing::store::OpenOptions::default())
+                .unwrap();
+        let t0 = 1_700_000_000_000_000_000i64;
+        for (id, at, item, step, run, label) in [
+            ("L-old", t0 - 1_000, 12, "spec", "run-0", "work"),
+            ("L-1", t0 + 1, 12, "build", "run-1", "build"),
+            ("L-2", t0 + 2, 12, "build", "run-1", "build/review"),
+            ("L-3", t0 + 3, 15, "build", "run-2", "build"),
+            ("L-4", t0 + 4, 12, "fix-pr", "run-3", "build"),
+            ("L-5", t0 + 5, 0, "insights:tech", "run-4", "work"),
+        ] {
+            let op = StoreOp::Launch(launch_row(id, at, Some(&tag(item, step, run, label))));
+            assert_eq!(store.apply(&[op]).unwrap(), 0);
+        }
+        drop(store);
+        let conn = crate::project::cli::open_store(&db).unwrap();
+        let mut blocked = Dispatch::queued("acme/hub", 15, None, t0);
+        blocked.state = State::Blocked;
+        blocked.reason = Some("3 run(s) failed".into());
+        fleet::save(&conn, &blocked).unwrap();
+        fleet::save(&conn, &Dispatch::queued("acme/hub", 16, None, t0)).unwrap();
+
+        let card = project_card(&conn, "Acme/Hub", t0)
+            .unwrap()
+            .expect("a card");
+        // the launch before the window is not counted
+        assert_eq!((card.runs, card.sessions, card.going), (4, 5, 0));
+        // a reading of the whole Project is no item's
+        assert_eq!(card.items, vec![12, 15]);
+        assert_eq!(
+            card.steps
+                .iter()
+                .map(|s| (s.step.as_str(), s.runs))
+                .collect::<Vec<_>>(),
+            vec![("build", 2), ("fix-pr", 1), ("insights", 1)]
+        );
+        assert_eq!(
+            (card.fleet_wip, card.fleet_blocked, card.fleet_review),
+            (1, 1, 0)
+        );
+        assert_eq!(card.blocked, vec!["#15: 3 run(s) failed"]);
+        // a hub with nothing in the window and nothing dispatched has no card
+        assert!(project_card(&conn, "acme/other", t0).unwrap().is_none());
+    }
+
     use super::*;
 
     #[test]

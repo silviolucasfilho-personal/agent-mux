@@ -41,11 +41,13 @@ pub enum Screen {
     Bugs,
     Uat,
     Milestones,
+    /// What the Project's steps cost and what is running (spec §9.3).
+    Observability,
     Health,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 13] = [
+    pub const ALL: [Screen; 14] = [
         Screen::Home,
         Screen::Board,
         Screen::Backlog,
@@ -58,6 +60,7 @@ impl Screen {
         Screen::Bugs,
         Screen::Uat,
         Screen::Milestones,
+        Screen::Observability,
         Screen::Health,
     ];
 
@@ -75,6 +78,7 @@ impl Screen {
             Screen::Bugs => "Bugs",
             Screen::Uat => "UAT and release",
             Screen::Milestones => "Milestones",
+            Screen::Observability => "Observability",
             Screen::Health => "Health",
         }
     }
@@ -89,6 +93,7 @@ impl Screen {
             Screen::Ready => &["Order", "Card"],
             Screen::Milestones => &["Features", "Order"],
             Screen::Health => &["Check"],
+            Screen::Observability => &["30 days", "Ever"],
             _ => &["Card"],
         }
     }
@@ -215,6 +220,12 @@ pub struct ProjectView {
     pub trace: Option<ItemTrace>,
     /// Where proposals (refine, estimate) wait: the CLI's scratch folder.
     pub scratch: PathBuf,
+    /// What each item's sessions add up to, its own and with what is under
+    /// it, read from the trace store on the tick.
+    pub totals: std::collections::HashMap<u64, crate::tracing::project_report::ItemTotals>,
+    /// The Observability screen's lines: the last 30 days, and ever.
+    pub activity: [Vec<String>; 2],
+    activity_at: Option<Instant>,
     /// The agents a session on an item can run as (`a`): name and what
     /// each is for, read when the screen opens.
     pub agents: Vec<(String, String)>,
@@ -266,6 +277,9 @@ impl ProjectView {
             scratch: crate::project::run::scratch_dir(
                 &crate::tracing::analysis::default_snapshot_dir(),
             ),
+            totals: std::collections::HashMap::new(),
+            activity: [Vec::new(), Vec::new()],
+            activity_at: None,
             agents: Vec::new(),
             dispatches: Vec::new(),
             proposals: Vec::new(),
@@ -382,6 +396,7 @@ impl ProjectView {
                 })
                 .count(),
             Screen::Milestones => s.milestones.iter().filter(|m| m.open).count(),
+            Screen::Observability => return None,
             Screen::Health => {
                 return self.checks.as_ref().map(|c| {
                     c.iter()
@@ -2215,6 +2230,8 @@ pub fn rows_for(
                 rows.extend((0..c.len()).map(Row::Check));
             }
         }
+        // no rows: the pane is the screen
+        Screen::Observability => {}
     }
     rows
 }
@@ -2813,6 +2830,35 @@ impl App {
             view.rebuild();
         }
         view.reload_proposals(false);
+        // what the steps cost: a local read, at most every ten seconds
+        if view
+            .activity_at
+            .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(10))
+        {
+            use crate::tracing::project_report as pr;
+            view.activity_at = Some(Instant::now());
+            let hub = view.hub();
+            let all = self
+                .trace_db_path
+                .as_deref()
+                .filter(|p| p.is_file())
+                .and_then(|p| crate::tracing::store::open_ro(p).ok())
+                .and_then(|conn| pr::hub_launches(&conn, &hub, 0).ok());
+            if let Some(all) = all {
+                let now = crate::project::now_ns();
+                let month = now - 30 * 86_400 * 1_000_000_000;
+                let recent: Vec<pr::StepLaunch> = all
+                    .iter()
+                    .filter(|l| l.started_ns >= month)
+                    .cloned()
+                    .collect();
+                view.totals = pr::item_totals(&all, view.snap.as_ref(), now);
+                view.activity = [
+                    pr::observability_lines(&recent, view.snap.as_ref(), "the last 30 days", now),
+                    pr::observability_lines(&all, view.snap.as_ref(), "ever", now),
+                ];
+            }
+        }
         // the fleet's cards follow the store, at the proposals' pace
         if view
             .dispatches_at
