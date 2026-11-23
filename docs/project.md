@@ -52,6 +52,7 @@ The left column holds the screens and, under them, the selected screen's rows. T
 | `f` | Fix what the review of the item's pull request asked for (the fix-pr step) |
 | `P` | Merge: the pull requests of a Feature's Stories in order, or of one Story or Bug |
 | `t` `R` `D` | On a Bug: accept, reject, mark a duplicate |
+| `d` `x` | On Development: dispatch the item to the fleet; take a dispatched item back to Backlog (`b` does the same on a Blocked card) |
 | `E` | Estimate the item in story points; with a proposal waiting, write it |
 | `W` | Propose a clearer description of the item; with a proposal waiting, write it |
 | `c` | Talk about the item: an interactive session with the item as its opening message |
@@ -224,6 +225,34 @@ agent-mux project merge <story or bug> --yes   one item's pull request
 
 `P` on a screen shows the same plan from the cache and asks before it starts the command.
 
+### The fleet
+
+Instead of running one item yourself and waiting, you can dispatch several and let agent-mux run them a few at a time.
+
+```
+agent-mux project dispatch <n> [--harness H]   the item's card goes to WIP
+agent-mux project fleet run                    run what is dispatched, 3 at a time, until stopped
+agent-mux project fleet run --once             the same, ending when nothing is left to run
+agent-mux project fleet status                 the slots, every card, and who holds which item
+agent-mux project cancel <n>                   back to Backlog; a run in progress is stopped
+```
+
+- **A run is `agent-mux project run <n>`** as a process of its own: a Story's build, a Feature's stack, a Task or a Bug's fix, each with its review and its delivery. Bugs go first, then the oldest dispatch. Its output is in a file the card names.
+- **The lease.** Before a run starts, agent-mux takes the item's lease: a ref on the hub's remote (`refs/heads/spec-wave-agent/claims/<n>`) whose commit says who holds it (`<your login>@<host>`) and when it last beat. It is `spec-wave-agent`'s own protocol, so that daemon and another machine's agent-mux see it and stay off the item, and this machine stays off theirs. The runner writes a heartbeat every two minutes; a lease with none for ten minutes may be taken by someone else. If this machine's lease is taken, the run is stopped at once and the card is Blocked.
+- **How a run ends.** A pull request open: the card goes to Review. A failure: it is queued again, and Blocked after three, with what the run said last. A run that ends cleanly with no pull request (a dependency not ready, nothing to build) is Blocked at once, since running it again would end the same way.
+- **The Development screen** is the kanban: `fleet · WIP`, `fleet · Blocked` and `fleet · Review` over the rest of the screen, which is the Backlog. `d` dispatches the selected item and starts the runner on this machine if none is going; `x` takes a card back. A Blocked card is dispatched again with `d`, from zero failures.
+
+One runner works a Project on a machine at a time: a second `fleet run` only queues what it was given and leaves. Moving a card on GitHub's board dispatches nothing.
+
+### The workspace
+
+```
+agent-mux project workspace map --issue <n>       where each code repository of the item is, or would be
+agent-mux project workspace prepare --issue <n>   clone the ones missing, and write the manifest
+```
+
+The repositories are those of the item's `repo:<slug>` labels and of everything under it (a Feature gathers its Stories'). Each is looked for as a build looks for it: the override in `.spec-wave/workspace.json`, the folder beside the hub, then `.spec-wave/repos/<slug>` inside the hub. `prepare` clones only that last kind (with your own git credentials, into a folder that ignores itself) and writes `.spec-wave/workspace-<n>.json`, the file spec-wave's own tools read. A missing override or sibling is your folder: it is reported, never cloned.
+
 ### Estimating and refining an item
 
 Two read-only sessions propose something about an item, and **nothing is written until you read the proposal and say yes**:
@@ -308,6 +337,11 @@ agent-mux project triage reject <n> --reason "…"
 agent-mux project triage duplicate <n> --of <original>
 agent-mux project advance [--yes]
 agent-mux project merge <n> [--yes] [--keep-branches] [--dry-run]
+agent-mux project workspace map|prepare --issue <n> [--json]
+agent-mux project dispatch <n> [--harness H]
+agent-mux project cancel <n>
+agent-mux project fleet status [--json]
+agent-mux project fleet run [--once] [--dispatch <n>] [--max-runs N] [--max-failures N] [--poll SECONDS]
 agent-mux project estimate <n> [--yes] [--discard] [--harness H] [--dry-run] [--json]
 agent-mux project refine <n> [--yes] [--discard] [--harness H] [--dry-run] [--json]
 agent-mux project run <n> [--step …] [--harness H] [--critic H] [--dry-run] [--apply] [--ignore-dependencies] [--keep-drafts]
@@ -342,7 +376,8 @@ A read that fails never becomes a fact. A document whose listing failed is `unkn
 ## 9. Not built yet
 
 - Closing the hub issue of a cross-repository Story when it reaches Done, and a Bug or a Task across several repositories.
-- QA and the dev-agent fleet (dispatch, slots, the lease).
+- QA.
+- In the fleet: dispatching to a named developer's machine, taking work from spec-wave's queue label, one branch and one pull request for a whole Feature (the daemon's delivery), a `[project.fleet]` section in agent-mux's settings (the limits are flags of `fleet run`), and stopping every process of a run when its lease is lost (the run's own process is stopped; a harness it started may outlive it for a moment).
 - The Observability screen, tokens and cost on an item's card, and a `projects` section in Heimdall's briefing.
 - Recording a Tech Leader's decision on a finding (`risk-accepted`).
 - Driving the repository's own Actions by trigger label instead of agent-mux's flows.

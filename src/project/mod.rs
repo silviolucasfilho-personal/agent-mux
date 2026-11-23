@@ -27,8 +27,10 @@ pub mod deliver;
 pub mod docs;
 pub mod doctor;
 pub mod fix_pr;
+pub mod fleet;
 pub mod github;
 pub mod launch;
+pub mod lease;
 pub mod merge;
 pub mod next;
 pub mod ops;
@@ -38,6 +40,7 @@ pub mod snapshot;
 pub mod stack;
 pub mod stage;
 pub mod store;
+pub mod workspace;
 pub mod write;
 
 pub use launch::ProjectLaunch;

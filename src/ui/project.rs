@@ -223,6 +223,11 @@ fn draw_list(f: &mut Frame, area: Rect, v: &ProjectView) {
                     width,
                     v.screen,
                     waiting.contains(number),
+                    // a card of the fleet says its state where others say their stage
+                    v.dispatches
+                        .iter()
+                        .find(|d| v.screen == Screen::Development && d.item == *number)
+                        .map(|d| d.state.as_str().to_string()),
                 ),
                 None => vec![Span::styled(format!("{marker}  #{number}"), dim())],
             },
@@ -282,11 +287,13 @@ fn item_spans(
     width: usize,
     screen: Screen,
     waiting: bool,
+    card: Option<String>,
 ) -> Vec<Span<'static>> {
     let indent = " ".repeat(usize::from(depth) * 2);
-    let right = match screen {
-        Screen::Board => it.priority.clone().unwrap_or_default(),
-        _ => stage_short(&stage::shown(it).stage),
+    let right = match (card, screen) {
+        (Some(state), _) => state,
+        (None, Screen::Board) => it.priority.clone().unwrap_or_default(),
+        (None, _) => stage_short(&stage::shown(it).stage),
     };
     let bang = if waiting { "!" } else { " " };
     let lead = format!("{marker}{indent}");
@@ -587,10 +594,24 @@ fn draw_pane(f: &mut Frame, area: Rect, v: &ProjectView) {
         }
         (Screen::Ready, Some(_)) if tab == 0 => (" order ".into(), order_of_row(v, s)),
         (_, Some(Row::Item { number, .. })) => match s.item(*number) {
-            Some(it) => (
-                format!(" #{} ", it.number),
-                cli::card_lines(it, s).into_iter().map(styled).collect(),
-            ),
+            Some(it) => {
+                let mut lines: Vec<Line> = cli::card_lines(it, s).into_iter().map(styled).collect();
+                if let Some(d) = v.dispatches.iter().find(|d| d.item == it.number) {
+                    lines.push(Line::raw(""));
+                    lines.push(Line::styled(
+                        format!(
+                            " fleet · {}: {}",
+                            d.column().label(),
+                            d.line(crate::project::now_ns())
+                        ),
+                        Style::default().fg(Color::Yellow),
+                    ));
+                    if let Some(log) = &d.log {
+                        lines.push(Line::styled(format!("   output: {log}"), dim()));
+                    }
+                }
+                (format!(" #{} ", it.number), lines)
+            }
             None => (" item ".into(), vec![]),
         },
         (Screen::Board, _) => (" board ".into(), board_summary(s)),
@@ -1052,7 +1073,9 @@ fn draw_foot(f: &mut Frame, area: Rect, v: &ProjectView) {
             ("n", "new"),
             ("m", "move"),
         ];
-        if v.screen == Screen::CodeReview {
+        if v.screen == Screen::Development {
+            pairs.extend([("d", "dispatch"), ("x", "take back")]);
+        } else if v.screen == Screen::CodeReview {
             pairs.extend([("f", "fix review"), ("P", "merge")]);
         } else if v.screen == Screen::Bugs {
             pairs.extend([("t", "accept"), ("R", "reject"), ("D", "duplicate")]);
@@ -1208,6 +1231,34 @@ mod tests {
         // a proposal of another item is not shown here
         v.proposals[0].number = 3;
         assert!(!screen_text(&v, 150, 40).contains("a proposal waits"));
+    }
+
+    #[test]
+    fn the_development_screen_is_a_kanban_once_something_is_dispatched() {
+        use crate::project::fleet::{Dispatch, State};
+        let mut v = view();
+        v.screen = Screen::Development;
+        v.rebuild();
+        let plain = screen_text(&v, 150, 30);
+        assert!(!plain.contains("fleet ·"), "{plain}");
+        assert!(
+            plain.contains("dispatch") && plain.contains("take back"),
+            "{plain}"
+        );
+
+        let mut running = Dispatch::queued("acme/hub", 2, None, 0);
+        running.state = State::Running;
+        running.owner = Some("ana@host".into());
+        running.started_ns = Some(crate::project::now_ns());
+        v.dispatches = vec![running];
+        v.rebuild();
+        // the card is first, under its column, and selected
+        v.set_cursor_for_test(1);
+        let text = screen_text(&v, 150, 30);
+        assert!(text.contains("fleet · WIP (1)"), "{text}");
+        assert!(text.contains("running"), "{text}");
+        assert!(text.contains("fleet · WIP: running for"), "{text}");
+        assert!(text.contains("as ana@host"), "{text}");
     }
 
     #[test]
