@@ -24,6 +24,8 @@ commands:
                                turns of a session, or observations of a trace
                                (--tree: nesting; --timeline: bars over the turn)
   swarm <id> [--tree | --timeline | --log] [--json] [--workspace DIR]
+  project <n> [--tree | --log] [--json] [--hub owner/repo] [--workspace DIR]
+        every session a Project step started for a work item, and for what is under it
                                one swarm as one trace: its coordinator, workers, sub-agents,
                                log and timeline (the id, or the workspace's live swarm)
   search <fts5 query> [--limit N] [--json]
@@ -247,6 +249,7 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
         "ls" | "list" => ls(&args),
         "show" => show(&args),
         "swarm" => swarm(&args),
+        "project" => project(&args),
         "search" => search(&args),
         "import" => import(&args),
         "export" => export(&args),
@@ -1856,6 +1859,55 @@ fn print_body(label: &str, body: &str) {
     for line in body.lines().take(200) {
         println!("      {line}");
     }
+}
+
+/// `trace project <n> [--tree | --log] [--json] [--hub owner/repo]`: every
+/// session a Project step started for one work item, and for what is
+/// under it, as one trace. The hub is the one of the folder's
+/// `.spec-wave.json` unless `--hub` names it.
+fn project(args: &Args) -> anyhow::Result<()> {
+    use super::project_report as pr;
+    let (_, resolved) = resolved()?;
+    let conn = open_ro(&resolved)?;
+    let raw = args
+        .positional
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("which work item? give its issue number, as 12 or #12"))?;
+    let item: u64 = raw
+        .trim_start_matches('#')
+        .parse()
+        .map_err(|_| anyhow::anyhow!("\"{raw}\" is not an issue number"))?;
+    let hub = match args.value("hub") {
+        Some(h) => h.to_string(),
+        None => {
+            let dir = args
+                .value("workspace")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            crate::project::config::load(&dir)
+                .map(|c| c.hub_repo().slug())
+                .map_err(|e| anyhow::anyhow!("{e}; or name the hub with --hub owner/repo"))?
+        }
+    };
+    let snap = crate::project::store::load(&conn, &hub).ok().flatten();
+    let report = pr::report(&conn, &hub, item, snap.as_ref())?;
+    if args.has("json") {
+        println!("{}", serde_json::to_string(&report)?);
+        return Ok(());
+    }
+    if args.has("timeline") {
+        anyhow::bail!("a Project item has no timeline view yet: use --tree or --log");
+    }
+    let now = now_ns();
+    let lines = if args.has("log") {
+        pr::log_lines(&report, now)
+    } else {
+        pr::tree_lines(&report, now)
+    };
+    for line in lines {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 /// `trace swarm <id> [--tree | --timeline | --log] [--json]`: one swarm as

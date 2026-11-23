@@ -180,7 +180,7 @@ pub fn launches(conn: &Connection, swarm_id: &str) -> rusqlite::Result<Vec<Launc
     Ok(out)
 }
 
-fn turns(conn: &Connection, launch_id: &str) -> rusqlite::Result<Vec<TurnReport>> {
+pub(crate) fn turns(conn: &Connection, launch_id: &str) -> rusqlite::Result<Vec<TurnReport>> {
     // `trace_stats` narrowed to the launch before grouping: the view itself
     // groups the whole store first (see `store::query`'s module docs)
     let mut stmt = conn.prepare(&crate::tracing::store::query::trace_stats_sql(
@@ -394,7 +394,7 @@ fn glyph(state: &str) -> &'static str {
     }
 }
 
-fn span(start_ns: i64, end_ns: Option<i64>, now_ns: i64) -> String {
+pub(crate) fn span(start_ns: i64, end_ns: Option<i64>, now_ns: i64) -> String {
     let from = &fmt_time(start_ns)[11..16];
     match end_ns {
         Some(e) => format!(
@@ -409,7 +409,7 @@ fn span(start_ns: i64, end_ns: Option<i64>, now_ns: i64) -> String {
     }
 }
 
-fn cost_label(cost: Option<f64>, unpriced: bool) -> String {
+pub(crate) fn cost_label(cost: Option<f64>, unpriced: bool) -> String {
     match (cost, unpriced) {
         (None, true) => "≥$0".into(),
         (None, false) => "—".into(),

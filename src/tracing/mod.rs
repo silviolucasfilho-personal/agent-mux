@@ -24,6 +24,7 @@ pub mod loops;
 pub mod map;
 pub mod opencode_db;
 pub mod pricing;
+pub mod project_report;
 pub mod scores;
 pub mod store;
 pub mod subagents;
@@ -148,6 +149,9 @@ pub struct LaunchPlan {
     /// A swarm's coordinator or worker: the keys written to
     /// `launches.metadata.swarm_*` and `parent_launch` (v24).
     pub swarm: Option<crate::bus::swarm::SwarmLaunch>,
+    /// A Project step's session: the work item it runs for, written to
+    /// `launches.metadata.project`.
+    pub project: Option<crate::project::ProjectLaunch>,
     profile_name: String,
     dir: PathBuf,
 }
@@ -759,6 +763,7 @@ impl TraceRuntime {
             loop_launch: None,
             workflow: None,
             swarm: None,
+            project: None,
             dir: dir.to_path_buf(),
         })
     }
@@ -1144,6 +1149,7 @@ impl TraceRuntime {
             loop_launch: None,
             workflow: None,
             swarm: None,
+            project: None,
             dir: dir.to_path_buf(),
         })
     }
@@ -1284,6 +1290,9 @@ impl TraceRuntime {
         }
         if let Some(sw) = &plan.swarm {
             sw.metadata(&mut meta);
+        }
+        if let Some(p) = &plan.project {
+            meta.insert("project".into(), p.metadata());
         }
         if let Some(lp) = &plan.loop_launch {
             meta.insert(

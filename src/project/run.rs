@@ -107,6 +107,8 @@ pub enum Planned {
     Apply,
     /// Build a Story or fix a Bug: code in a worktree, a draft pull request.
     Build(Box<super::build::Build>),
+    /// Fix what a pull request's review asked for, on its own branch.
+    FixPr(Box<super::fix_pr::FixPr>),
     /// A step of the flow that agent-mux does not run yet.
     NotBuilt(Action),
 }
@@ -122,7 +124,7 @@ pub fn forced_action(step: &str, t: Option<ItemType>) -> Result<Action, String> 
         "build" | "fix" | "implement" => Action::Implement,
         other => {
             return Err(format!(
-                "\"{other}\" is not a step: spec, plan, bug, critique, validate, build or fix"
+                "\"{other}\" is not a step: spec, plan, bug, critique, validate, build, fix or fix-pr"
             ));
         }
     };

@@ -674,6 +674,15 @@ pub enum Op {
         /// Create the issues of the reviewed draft: the operator's approval.
         apply: bool,
     },
+    /// Another `agent-mux project …` command for an item, as a process of
+    /// its own: a fix-pr step, a merge.
+    Process {
+        number: u64,
+        /// The command line after `project`, without `--dir`.
+        args: Vec<String>,
+        /// A few words: "the fix-pr step", "the merge".
+        what: String,
+    },
 }
 
 impl Op {
@@ -689,6 +698,7 @@ impl Op {
             Op::Triage { number, .. } => format!("triaging #{number}"),
             Op::Advance(m) => format!("making {} board move(s)", m.len()),
             Op::RunStep { number, .. } => format!("starting the next step of #{number}"),
+            Op::Process { number, what, .. } => format!("starting {what} of #{number}"),
         }
     }
 }
@@ -783,7 +793,7 @@ impl ProjectView {
 
     /// A verb's key. `None`: the key is not a verb here.
     fn verb_key(&mut self, c: char) -> Option<Outcome> {
-        if !matches!(c, 'n' | 'm' | 'M' | 't' | 'R' | 'D' | 'A' | 'r') {
+        if !matches!(c, 'n' | 'm' | 'M' | 't' | 'R' | 'D' | 'A' | 'r' | 'f' | 'P') {
             return None;
         }
         if self.snap.is_none() {
@@ -795,6 +805,89 @@ impl ProjectView {
         let target = self.target().cloned();
         let need = |what: &str| Some(Outcome::Notice(format!("select an item to {what}")));
         match c {
+            'f' => {
+                let Some(it) = target else {
+                    return need("fix its pull request");
+                };
+                let open: Vec<&crate::project::Pull> =
+                    it.pulls.iter().filter(|p| p.open()).collect();
+                let [pull] = open.as_slice() else {
+                    return Some(Outcome::Notice(format!(
+                        "#{}: fix-pr needs one open pull request, and it has {}",
+                        it.number,
+                        open.len()
+                    )));
+                };
+                if !matches!(it.item_type, Some(ItemType::Story | ItemType::Bug)) {
+                    return Some(Outcome::Notice(format!(
+                        "#{}: fix-pr works on the pull request of a Story or a Bug",
+                        it.number
+                    )));
+                }
+                self.modal = Some(Modal::Confirm {
+                    lines: vec![
+                        format!(
+                            "Fix what the review of pull request #{} asked for (#{})",
+                            pull.number, it.number
+                        ),
+                        "It reads the review threads that are not resolved. With none, it stops and writes nothing.".into(),
+                        format!("A session on Claude Code commits one fix per comment in a worktree on `{}`.", pull.head),
+                        "A second session reviews the fixes; the work goes back to the first at most twice.".into(),
+                        "If the review approves, agent-mux pushes to that branch, answers each comment with its commit and leaves a summary.".into(),
+                    ],
+                    op: Op::Process {
+                        number: it.number,
+                        args: vec![
+                            "run".into(),
+                            it.number.to_string(),
+                            "--step".into(),
+                            "fix-pr".into(),
+                        ],
+                        what: "the fix-pr step".into(),
+                    },
+                });
+            }
+            'P' => {
+                let Some(it) = target else {
+                    return need("merge");
+                };
+                let Some(snap) = &self.snap else {
+                    return Some(Outcome::None);
+                };
+                // the plan as the cache has it; the command reads GitHub
+                // again before it merges anything
+                let sorted = match crate::project::merge::scope(snap, it.number) {
+                    Ok(s) => s,
+                    Err(e) => return Some(Outcome::Notice(e)),
+                };
+                let plan = crate::project::merge::plan(&sorted, snap, &Default::default());
+                if let Some(block) = plan.blocks.first() {
+                    return Some(Outcome::Notice(format!("#{}: {block}", it.number)));
+                }
+                if plan.queue.is_empty() {
+                    return Some(Outcome::Notice(format!(
+                        "#{}: {}",
+                        it.number,
+                        if plan.done.is_empty() {
+                            "no open pull request to merge"
+                        } else {
+                            "everything is merged already"
+                        }
+                    )));
+                }
+                let mut lines = vec![format!("Merge #{}", it.number)];
+                lines.extend(crate::project::merge::plan_lines(&plan, &snap.hub));
+                lines.push("Each one is merged with a merge commit and its item moves to QA; the branches are deleted at the end.".into());
+                lines.push("GitHub is read again first: a draft, or a merge GitHub refuses, stops the queue there.".into());
+                self.modal = Some(Modal::Confirm {
+                    lines,
+                    op: Op::Process {
+                        number: it.number,
+                        args: vec!["merge".into(), it.number.to_string(), "--yes".into()],
+                        what: "the merge".into(),
+                    },
+                });
+            }
             'r' => {
                 let Some(it) = target else {
                     return need("run its next step");
@@ -2169,6 +2262,20 @@ impl App {
             });
             return;
         }
+        if let Op::Process { number, args, what } = &op {
+            let mut args = args.clone();
+            args.push("--dir".to_string());
+            args.push(cfg.root().to_string_lossy().into_owned());
+            let name = format!("project-{}-{number}-{}", args[0], crate::project::now_ns());
+            self.notice = Some(match self.start_project_process(&name, &args) {
+                Ok(log) => Notice::info(format!(
+                    "started {what} of #{number}; its output is in {}. [Ctrl+R] reads the result",
+                    log.display()
+                )),
+                Err(e) => Notice::error(format!("project: {e}")),
+            });
+            return;
+        }
         if view.op_rx.is_some() {
             return;
         }
@@ -2198,7 +2305,9 @@ impl App {
                     of,
                 } => run.triage(action, *number, severity.as_deref(), reason.as_deref(), *of),
                 Op::Advance(moves) => run.apply_moves(moves),
-                Op::RunStep { .. } => Err("a step is started as its own process".to_string()),
+                Op::RunStep { .. } | Op::Process { .. } => {
+                    Err("a step is started as its own process".to_string())
+                }
             };
             // what changed is read again, into the screen and the cache
             let mut fresh = None;
@@ -2573,6 +2682,55 @@ mod tests {
             panic!("a second build was offered")
         };
         assert!(said.contains("pr-pending"), "{said}");
+
+        // its pull request is a draft: the merge is refused with the reason,
+        // and fix-pr asks first
+        let Outcome::Notice(said) = v.handle_key(&key(KeyCode::Char('P'))) else {
+            panic!("a draft was offered for merge: {:?}", v.modal)
+        };
+        assert!(said.contains("draft"), "{said}");
+        assert_eq!(v.handle_key(&key(KeyCode::Char('f'))), Outcome::None);
+        let Some(Modal::Confirm { lines, op }) = &v.modal else {
+            panic!("no confirmation: {:?}", v.modal)
+        };
+        assert!(
+            lines[0].starts_with("Fix what the review of pull request #"),
+            "{lines:?}"
+        );
+        assert_eq!(
+            *op,
+            Op::Process {
+                number: 2,
+                args: vec!["run".into(), "2".into(), "--step".into(), "fix-pr".into()],
+                what: "the fix-pr step".into(),
+            }
+        );
+        v.modal = None;
+        // marked ready, the merge shows its plan and asks
+        let snap = v.snap.as_mut().unwrap();
+        let story = snap.items.iter_mut().find(|i| i.number == 2).unwrap();
+        story.pulls.iter_mut().for_each(|p| p.draft = false);
+        assert_eq!(v.handle_key(&key(KeyCode::Char('P'))), Outcome::None);
+        let Some(Modal::Confirm { lines, op }) = &v.modal else {
+            panic!("no merge confirmation: {:?}", v.modal)
+        };
+        assert_eq!(lines[0], "Merge #2");
+        assert!(lines[1].starts_with("merge order"), "{lines:?}");
+        assert_eq!(
+            *op,
+            Op::Process {
+                number: 2,
+                args: vec!["merge".into(), "2".into(), "--yes".into()],
+                what: "the merge".into(),
+            }
+        );
+        // an item with no pull request has nothing to fix
+        v.modal = None;
+        on_item(&mut v, Screen::Development, 31);
+        let Outcome::Notice(said) = v.handle_key(&key(KeyCode::Char('f'))) else {
+            panic!("fix-pr was offered with no pull request")
+        };
+        assert!(said.contains("one open pull request"), "{said}");
     }
 
     #[test]

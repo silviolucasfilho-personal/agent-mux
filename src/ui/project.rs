@@ -951,7 +951,9 @@ fn draw_foot(f: &mut Frame, area: Rect, v: &ProjectView) {
             ("n", "new"),
             ("m", "move"),
         ];
-        if v.screen == Screen::Bugs {
+        if v.screen == Screen::CodeReview {
+            pairs.extend([("f", "fix review"), ("P", "merge")]);
+        } else if v.screen == Screen::Bugs {
             pairs.extend([("t", "accept"), ("R", "reject"), ("D", "duplicate")]);
         } else {
             pairs.extend([("M", "repair"), ("A", "catch up board")]);

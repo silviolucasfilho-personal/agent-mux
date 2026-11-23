@@ -2677,6 +2677,10 @@ pub struct App {
     /// dialog's launch, taken by the spawn, which records it on the
     /// launch row (`metadata.agent`).
     pub(crate) launch_agent: Option<String>,
+    /// The work item this process runs a Project step for
+    /// (`project::cli::run_flow_in`): every workflow session it starts
+    /// records it on its launch row (`metadata.project`).
+    pub project_launch: Option<crate::project::ProjectLaunch>,
     /// The Library screen as it was when it opened a dialog or an editor:
     /// it comes back when that closes (`App::library_resume`).
     pub(crate) library_return: Option<Box<library::LibraryState>>,
@@ -2987,6 +2991,7 @@ impl App {
             closing_sessions: std::collections::HashSet::new(),
             notice: None,
             launch_agent: None,
+            project_launch: None,
             library_return: None,
             markdown_return: None,
             profiles,
@@ -4287,6 +4292,10 @@ impl App {
         // session that outlives its run's bookkeeping keeps its place.
         let group = session_group(loop_launch.as_ref(), workflow_launch.as_ref());
         if let (Some(p), Some(w)) = (plan.as_mut(), workflow_launch) {
+            p.project = self
+                .project_launch
+                .as_ref()
+                .map(|l| l.for_session(&w.run_id, &w.step));
             p.workflow = Some(w);
         }
         if let (Some(p), Some(launch)) = (plan.as_mut(), loop_launch) {

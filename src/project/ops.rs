@@ -694,6 +694,70 @@ impl<'a> Ops<'a> {
         r
     }
 
+    /// The board after an item's pull request merged: the Story or Bug is
+    /// in QA with its status back to Todo, and a Story's Feature follows
+    /// once every one of its Stories is there. Best effort, as
+    /// `build_board` is: a merge is never undone by a board that failed.
+    pub fn merged_board(&self, number: u64) -> Report {
+        let mut r = Report::default();
+        let board = self.read(number).and_then(|i| Ok((i, self.board()?)));
+        let (item, board) = match board {
+            Ok(x) => x,
+            Err(e) => {
+                r.say(format!(
+                    "! the board was not updated for #{number}: {e}; `agent-mux project advance` makes the move later"
+                ));
+                return r;
+            }
+        };
+        let mut step = |it: &Item| {
+            let what = it.item_type.map_or("Issue", ItemType::as_str);
+            match self.advance(&board, it, STAGE_QA, Some(STATUS_TODO)) {
+                Ok(true) => {
+                    r.touch(it.number);
+                    r.say(format!(
+                        "{what} #{} → {STAGE_QA} / {STATUS_TODO}",
+                        it.number
+                    ));
+                }
+                Ok(false) => {}
+                Err(e) => r.say(format!("! {what} #{} was not moved: {e}", it.number)),
+            }
+        };
+        step(&item);
+        if item.item_type != Some(ItemType::Story) {
+            return r;
+        }
+        let Some(feature) = item
+            .parent
+            .and_then(|p| self.read(p).ok())
+            .filter(|p| p.item_type == Some(ItemType::Feature))
+        else {
+            return r;
+        };
+        let others: Vec<u64> = feature
+            .children
+            .iter()
+            .copied()
+            .filter(|c| *c != number)
+            .collect();
+        let siblings = if others.is_empty() {
+            Vec::new()
+        } else {
+            read_items(self.tools, self.cfg, &others).unwrap_or_default()
+        };
+        let behind = siblings.len() != others.len()
+            || siblings.iter().any(|s| {
+                s.item_type == Some(ItemType::Story)
+                    && s.open
+                    && !stage::at_or_past(s.stage.as_deref(), STAGE_QA)
+            });
+        if !behind {
+            step(&feature);
+        }
+        r
+    }
+
     pub fn story_review(&self, number: u64) -> Result<Report, String> {
         let item = self.read(number)?;
         if item.item_type != Some(ItemType::Story) {
@@ -851,7 +915,7 @@ pub(crate) mod tests {
     use crate::project::next::tests::item;
     use std::path::{Path, PathBuf};
 
-    const CONFIG: &str = r#"{"version":"1.7.6","owner":"acme","repo":"hub",
+    pub(crate) const CONFIG: &str = r#"{"version":"1.7.6","owner":"acme","repo":"hub",
       "project":{"id":"PVT_x","title":"hub","fields":{
         "Etapa":{"id":"F_STAGE","options":{"📥 Backlog":"o_backlog","🐞 Triagem":"o_triage","✅ Ready":"o_ready",
            "🚧 Desenvolvimento":"o_dev","👀 Code Review":"o_review","🧪 QA":"o_qa","🎉 Done":"o_done"}},
