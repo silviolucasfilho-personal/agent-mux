@@ -1817,6 +1817,42 @@ Both read only.
   parser agent-mux does not carry), and the downgrade of a grave finding
   whose quote is not in the documents (as in §20).
 - **Not built:** the Preflight and Audit tabs of the Milestones screen
-  and their keys (`P`, `A`, `g`).
+  and their keys (`P`, `A`, `g`): §36 built the tabs.
 - **Phase 5 is built** as §32 to §35 describe, less what each names.
   Phase 6 (`project init`, the web pages) is not started.
+
+## 36. Phase 5, the Milestones screen, as built
+
+The Milestones screen's row of §9.2: a milestone's QA trail, preflight
+and audit as tabs, after Features and Order.
+
+- **Tabs:** Features · Order · QA trail · Preflight · Audit
+  (`Screen::tabs`, `TAB_TRAIL`, `TAB_PREFLIGHT`, `TAB_AUDIT`). The first
+  two are drawn from the snapshot. The other three are lines read on a
+  thread of their own when the tab opens (`ProjectView::milestone_due`,
+  `App::project_load_milestone`, taken by `project_tick` into
+  `ProjectView.milestone_reads`), once per milestone and tab; `r` drops
+  the open one so it is read again, and a sync drops them all. None is
+  read on the UI thread, and none writes.
+- **One text for the command and the screen.** `project preflight` and
+  `project audit` were split into a read and its lines
+  (`cli::preflight_read`, `preflight_lines`; `cli::audit_read`,
+  `audit_head`, `audit_lines`, `audit_tail`), and the tabs show those
+  lines. The tabs read over the snapshot on the screen, where the
+  commands read GitHub first.
+- **The QA trail tab** (`app::project::trail_lines`, pure): each
+  Feature's scope (`trail::classify_scope`) and plan
+  (`trail::classify_for_plan`), the gate (`trail::run_gate`), the cycles
+  known (`trail::cycles`: kept here and merged; only the kept ones with
+  no checkout of the hub) and the last one's report (`trail::render_md`).
+- **Keys differ from §9.2's row.** `P` and `A` are the merge and the
+  board catch-up on every screen, so the preflight and the audit have no
+  key: they are read when their tab opens. `Q` on a milestone starts
+  `project qa-trail plan <number>` while the gate holds a Feature and
+  `project qa-trail run <number>` once it holds none; `C` starts
+  `project audit --milestone <number> --critique`. Both are a
+  confirmation and then a process of its own (`Op::Process`), named by
+  the milestone's number, never its title.
+- **Not built:** `g` (generate the missing specs of a milestone: `r` on
+  each Feature does it), and the set critique's findings in the Audit
+  tab: they are in the process's output file.

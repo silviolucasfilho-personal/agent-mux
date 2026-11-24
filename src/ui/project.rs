@@ -4,7 +4,8 @@
 
 use super::flow::{dim, head, hints, key_style};
 use crate::app::project::{
-    Focus, ITEM_TABS, Modal, ProjectView, Row, Screen, TAB_TRACE, milestone_features, needs_you,
+    Focus, ITEM_TABS, Modal, ProjectView, Row, Screen, TAB_AUDIT, TAB_PREFLIGHT, TAB_TRACE,
+    TAB_TRAIL, milestone_features, needs_you,
 };
 use crate::project::contract::*;
 use crate::project::doctor::Status;
@@ -509,6 +510,53 @@ fn milestone_lines(s: &Snapshot, at: Option<usize>) -> Vec<Line<'static>> {
     out
 }
 
+/// A read tab of a milestone (QA trail, Preflight, Audit): what was read,
+/// or that it is being read.
+fn milestone_read_lines(
+    v: &ProjectView,
+    s: &Snapshot,
+    at: Option<usize>,
+    tab: usize,
+) -> Vec<Line<'static>> {
+    let Some(m) = at.and_then(|i| s.milestones.get(i)) else {
+        return vec![Line::styled(
+            " Features with no milestone have no trail, preflight or audit",
+            dim(),
+        )];
+    };
+    let mut out: Vec<Line> = match v.milestone_read(m.number, tab) {
+        Some(r) => match &r.lines {
+            Ok(lines) => lines.iter().map(|l| styled(format!(" {l}"))).collect(),
+            Err(why) => vec![Line::styled(
+                format!(" not read: {why}"),
+                Style::default().fg(Color::Red),
+            )],
+        },
+        None => {
+            return vec![Line::styled(
+                match tab {
+                    TAB_PREFLIGHT => " Reading the environment from GitHub and this machine…",
+                    TAB_AUDIT => " Reading the specs of the open Features…",
+                    _ => " Reading the cycles…",
+                },
+                dim(),
+            )];
+        }
+    };
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        match tab {
+            TAB_PREFLIGHT => " [r] read again · nothing is written",
+            TAB_AUDIT => {
+                " [r] read again · [C] the set critique, one read-only session over every spec"
+            }
+            _ => " [r] read again · [Q] the trail's next command",
+        },
+        dim(),
+    ));
+    out
+}
+
 fn order_of_row(v: &ProjectView, s: &Snapshot) -> Vec<Line<'static>> {
     let feature = match v.selected_row() {
         Some(Row::Heading { key, .. }) => key.strip_prefix("feature:").and_then(|n| n.parse().ok()),
@@ -590,6 +638,8 @@ fn draw_pane(f: &mut Frame, area: Rect, v: &ProjectView) {
                 .map_or("no milestone".to_string(), |m| m.title.clone());
             let lines = if tab == 0 {
                 milestone_lines(s, *at)
+            } else if tab >= TAB_TRAIL {
+                milestone_read_lines(v, s, *at, tab)
             } else {
                 let title = at
                     .and_then(|i| s.milestones.get(i))
@@ -1110,6 +1160,9 @@ fn draw_foot(f: &mut Frame, area: Rect, v: &ProjectView) {
         if v.screen == Screen::Uat {
             pairs.push(("Q", "run QA / plan"));
         }
+        if v.screen == Screen::Milestones {
+            pairs.extend([("←→ 1-5", "tabs"), ("Q", "QA trail"), ("C", "set critique")]);
+        }
         if v.screen == Screen::Development {
             pairs.extend([("d", "dispatch"), ("x", "take back")]);
         } else if v.screen == Screen::CodeReview {
@@ -1444,5 +1497,24 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("Cadastro de Pedidos"));
+
+        // a read tab: that it is being read, then what was read
+        v.tab = crate::app::project::TAB_AUDIT;
+        let text = screen_text(&v, 150, 30);
+        assert!(text.contains("Reading the specs"), "{text}");
+        let number = v.selected_milestone().unwrap().number;
+        v.milestone_reads.push(crate::app::project::MilestoneRead {
+            milestone: number,
+            tab: crate::app::project::TAB_AUDIT,
+            lines: Ok(vec![
+                "Milestone \"v1\" of acme/hub: 1 Feature(s) audited".into(),
+            ]),
+        });
+        let text = screen_text(&v, 150, 30);
+        assert!(text.contains("1 Feature(s) audited"), "{text}");
+        assert!(text.contains("[C] the set critique"), "{text}");
+        v.milestone_reads[0].lines = Err("no checkout of the hub".into());
+        let text = screen_text(&v, 150, 30);
+        assert!(text.contains("not read: no checkout of the hub"), "{text}");
     }
 }

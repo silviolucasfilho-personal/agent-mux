@@ -28,7 +28,7 @@ F1 → **Open project** opens the Project of the selected session's folder.
 | Code review | Items with an open pull request for their code: changes requested, approved, waiting for a person, still a draft; and items the board says are in review with no pull request |
 | Bugs | Bugs to triage first, then each later stage of a Bug's track |
 | UAT and release | What is in acceptance (Homologação) and what waits for deploy |
-| Milestones | Each open milestone, its Features and the state of each one's documents |
+| Milestones | Each open milestone, its Features and the state of each one's documents; tabs for its QA trail, its preflight and its audit |
 | Observability | What the Project's steps cost and what is running: totals, sessions going now, and the cost by step, harness, milestone, executor and item, for the last 30 days and ever |
 | Health | What `agent-mux project doctor` reports |
 
@@ -295,7 +295,7 @@ When the targets end, the cycle's report is written: `docs/qa/<milestone>/cycle-
 
 `--only 12,15` limits a cycle to some Features. A copy of each cycle is kept on this machine, so the next cycle finds it before its pull request is merged.
 
-Not done: spec-wave runs each Feature in a container (`qa.lead.container`); here each runs in a worktree on this machine, so two Features that need the same port or database will collide: use `--parallel 1` then. The Milestones screen does not show the trail yet.
+Not done: spec-wave runs each Feature in a container (`qa.lead.container`); here each runs in a worktree on this machine, so two Features that need the same port or database will collide: use `--parallel 1` then.
 
 ### Before a milestone's documents
 
@@ -330,7 +330,26 @@ A dependency is read three ways: `#N`, the Feature's slug, and its title. One on
 
 `--critique` adds one read-only session (the `project-critique` flow with `kind = conjunto`, on `--critic H`) that reads every spec against the others, for what no grep finds: the same rule told two ways, a dependency whose two ends disagree, two specs describing the same thing. It needs at least two specs. A grave finding is material. The findings are printed as a comment ready for the issues of both ends; agent-mux posts nothing. A critique that fails fails the command, so an `ok` never covers only the cheap half. `--dry-run` says what the critique would read and starts no session.
 
-Not done: the `decisoes_de_modelagem` check of `tech_context.yml` (a resource declared with no owner), and both commands on the Milestones screen.
+Not done: the `decisoes_de_modelagem` check of `tech_context.yml` (a resource declared with no owner).
+
+### A milestone on the screen
+
+The Milestones screen shows a milestone in five tabs (`←`/`→` or `1` to `5`):
+
+| Tab | What it shows | Where it comes from |
+|---|---|---|
+| Features | each Feature's stage and documents | the last read of the Project |
+| Order | the execution order of each Feature's Stories | the last read of the Project |
+| QA trail | where each Feature stands for a cycle, what `Q` would start, and the last cycle's report | the last read, and the cycles kept on this machine and on the default branch |
+| Preflight | what `project preflight` prints | `gh` and this machine, read when the tab opens |
+| Audit | what `project audit` prints, without the set critique | the specs where they are; GitHub only for a `#N` the last read does not know |
+
+The last three are read on a thread of their own, once per milestone, when the tab opens; `r` reads the open one again, and `Ctrl+R` (which reads the whole Project again) drops them all. The Preflight and Audit tabs judge the Project as it was last read, where the commands read GitHub first. Opening a tab writes nothing.
+
+Two keys start a command as a process of its own, each after a confirmation that says what will be written:
+
+- `Q`: `project qa-trail plan` while a Feature in QA has no released plan, and `project qa-trail run` once every one has. With no Feature in QA it starts nothing.
+- `C`: `project audit --milestone <M> --critique`, the set critique. Its findings are in the process's output file (the status line names it), and nothing is posted.
 
 ### The fleet
 
@@ -530,7 +549,8 @@ A read that fails never becomes a fact. A document whose listing failed is `unkn
 ## 9. Not built yet
 
 - Closing the hub issue of a cross-repository Story when it reaches Done, and a Bug or a Task across several repositories.
-- A container per Feature in the QA of a milestone, and the trail, the preflight and the audit on the Milestones screen.
+- A container per Feature in the QA of a milestone.
+- On the Milestones screen: a key that generates a milestone's missing specs, and the set critique's findings in the Audit tab (they are in the command's output).
 - In the milestone's audit: the `decisoes_de_modelagem` check of `tech_context.yml`.
 - Starting the QA plan from the `spec-wave:qa` label, and the comments spec-wave leaves when the step is refused: the command prints the reason instead.
 - In the fleet: dispatching to a named developer from the screens (the command does it), the extra tracks of spec-wave's queue label (`devAgent.queues`), and rounds inside a run.
