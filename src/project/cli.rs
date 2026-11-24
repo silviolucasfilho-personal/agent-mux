@@ -3270,22 +3270,27 @@ fn milestone_features<'a>(s: &'a Snapshot, title: &str) -> Vec<&'a Item> {
 /// What would make every generation of a round fail alike: gh's login,
 /// who runs a step, the harness, the hub's checkout and the push a
 /// document is published with.
-fn preflight_environment(e: &Env, s: &Snapshot, harness: Harness) -> Vec<doctor::Check> {
+fn preflight_environment(
+    tools: &Tools,
+    cfg: &ProjectConfig,
+    s: &Snapshot,
+    harness: Harness,
+) -> Vec<doctor::Check> {
     use doctor::{Check, Status};
-    let hub = e.cfg.hub_repo().slug();
-    let cwd = e.cfg.root();
+    let hub = cfg.hub_repo().slug();
+    let cwd = cfg.root();
     let probe = doctor::Probe {
-        auth: Some(super::github::auth_status(&e.tools, cwd)),
+        auth: Some(super::github::auth_status(tools, cwd)),
         execution_var: Some(super::github::variable(
-            &e.tools,
+            tools,
             cwd,
             &hub,
             "SPEC_WAVE_EXECUTION",
         )),
-        workflows: Some(super::github::workflow_files(&e.tools, cwd, &hub)),
+        workflows: Some(super::github::workflow_files(tools, cwd, &hub)),
         labels: None,
     };
-    let mut out: Vec<Check> = doctor::checks(&e.cfg, &Ok(s.clone()), &probe)
+    let mut out: Vec<Check> = doctor::checks(cfg, &Ok(s.clone()), &probe)
         .into_iter()
         .filter(|c| c.name == "gh" || c.name == "execution mode")
         .collect();
@@ -3310,11 +3315,11 @@ fn preflight_environment(e: &Env, s: &Snapshot, harness: Harness) -> Vec<doctor:
             ),
         )
     });
-    out.push(match steps::hub_root(&e.cfg) {
+    out.push(match steps::hub_root(cfg) {
         Ok(root) => check(Status::Ok, "hub checkout", root.display().to_string()),
         Err(why) => check(Status::Fail, "hub checkout", why),
     });
-    out.push(match super::github::can_push(&e.tools, cwd, &hub) {
+    out.push(match super::github::can_push(tools, cwd, &hub) {
         Ok(Some(true)) => check(
             Status::Ok,
             "publishing",
@@ -3341,10 +3346,121 @@ fn preflight_environment(e: &Env, s: &Snapshot, harness: Harness) -> Vec<doctor:
     out
 }
 
+/// A milestone's preflight, as read: what `project preflight` prints and
+/// what the Milestones screen shows.
+pub struct PreflightRead {
+    pub environment: Vec<doctor::Check>,
+    pub inventory: super::audit::Inventory,
+    pub verdict: super::audit::PreflightVerdict,
+}
+
+impl PreflightRead {
+    pub fn blocked(&self) -> bool {
+        self.verdict.status == "bloqueio"
+    }
+}
+
+/// Reads a milestone's preflight: the environment from `gh` and this
+/// machine, the inventory from the snapshot. Writes nothing.
+pub fn preflight_read(
+    tools: &Tools,
+    cfg: &ProjectConfig,
+    s: &Snapshot,
+    milestone: &super::Milestone,
+    harness: Harness,
+) -> PreflightRead {
+    use super::audit;
+    let inventory = audit::inspect_milestone(&milestone_features(s, &milestone.title));
+    let environment = preflight_environment(tools, cfg, s, harness);
+    let verdict = audit::preflight_verdict(&environment, &inventory);
+    PreflightRead {
+        environment,
+        inventory,
+        verdict,
+    }
+}
+
+/// The preflight for a person, line by line.
+pub fn preflight_lines(
+    s: &Snapshot,
+    milestone: &super::Milestone,
+    r: &PreflightRead,
+) -> Vec<String> {
+    use super::audit;
+    let (environment, inventory, verdict) = (&r.environment, &r.inventory, &r.verdict);
+    let mut out = vec![format!(
+        "Preflight of {} (base: {})",
+        s.hub, s.default_branch
+    )];
+    for c in environment {
+        out.push(format!("  {} {:<16} {}", c.status.mark(), c.name, c.detail));
+    }
+    out.push(String::new());
+    out.push(format!(
+        "Milestone \"{}\": {} Feature(s), {} to generate",
+        milestone.title,
+        inventory.features.len(),
+        inventory.gerar.len()
+    ));
+    for f in &inventory.features {
+        out.push(format!(
+            "  {:<22} #{} {}{}",
+            audit::spec_mark(f),
+            f.number,
+            f.title.chars().take(60).collect::<String>(),
+            f.pr.as_ref()
+                .map(|p| format!("  PR #{}", p.number))
+                .unwrap_or_default()
+        ));
+    }
+    if !inventory.gatilhos_pendentes.is_empty() {
+        out.push(String::new());
+        out.push("  Trigger labels left behind (remove them before generating):".to_string());
+        for g in &inventory.gatilhos_pendentes {
+            out.push(format!("    #{}: {}", g.number, g.labels.join(", ")));
+        }
+    }
+    if !verdict.avisos.is_empty() || !verdict.bloqueios.is_empty() {
+        out.push(String::new());
+    }
+    // an environment line is in the checklist above already
+    let shown: Vec<String> = environment
+        .iter()
+        .map(|c| format!("{}: {}", c.name, c.detail))
+        .collect();
+    for w in verdict.avisos.iter().filter(|w| !shown.contains(w)) {
+        out.push(format!("  ! {w}"));
+    }
+    for b in verdict.bloqueios.iter().filter(|b| !shown.contains(b)) {
+        out.push(format!("  ✗ {b}"));
+    }
+    out.push(String::new());
+    out.push(if r.blocked() {
+        format!(
+            "{} block(s). Fix them before generating.",
+            verdict.bloqueios.len()
+        )
+    } else if inventory.gerar.is_empty() {
+        "Preflight ok. Nothing to generate.".to_string()
+    } else {
+        format!(
+            "Preflight ok. {} spec(s) to generate: `agent-mux project run <n>` on {}.",
+            inventory.gerar.len(),
+            inventory
+                .gerar
+                .iter()
+                .map(|f| format!("#{}", f.number))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
+    out
+}
+
 /// `project preflight --milestone M [--harness H] [--json]`: the port of
 /// spec-wave's `preflight`. Reads only.
 fn cmd_preflight(a: &Args) -> anyhow::Result<()> {
-    use super::{audit, trail};
+    use super::trail;
     let reference = milestone_arg(a, "preflight")?;
     let harness =
         harness_of(a.value("--harness"), Harness::Claude).map_err(|x| anyhow::anyhow!(x))?;
@@ -3357,10 +3473,7 @@ fn cmd_preflight(a: &Args) -> anyhow::Result<()> {
     let milestone = trail::resolve_milestone(&s.milestones, &reference)
         .map_err(|x| anyhow::anyhow!(x))?
         .clone();
-    let inventory = audit::inspect_milestone(&milestone_features(&s, &milestone.title));
-    let environment = preflight_environment(&e, &s, harness);
-    let verdict = audit::preflight_verdict(&environment, &inventory);
-    let blocked = verdict.status == "bloqueio";
+    let read = preflight_read(&e.tools, &e.cfg, &s, &milestone, harness);
 
     if a.flag("--json") {
         println!(
@@ -3371,78 +3484,18 @@ fn cmd_preflight(a: &Args) -> anyhow::Result<()> {
                     "number": milestone.number,
                     "base": s.default_branch,
                 },
-                "ambiente": environment,
-                "inventario": inventory,
-                "veredito": verdict,
+                "ambiente": read.environment,
+                "inventario": read.inventory,
+                "veredito": read.verdict,
             }))?
         );
-        if blocked {
-            std::process::exit(1);
-        }
-        return Ok(());
-    }
-
-    println!("Preflight of {} (base: {})", s.hub, s.default_branch);
-    for c in &environment {
-        println!("  {} {:<16} {}", c.status.mark(), c.name, c.detail);
-    }
-    println!(
-        "\nMilestone \"{}\": {} Feature(s), {} to generate",
-        milestone.title,
-        inventory.features.len(),
-        inventory.gerar.len()
-    );
-    for f in &inventory.features {
-        println!(
-            "  {:<22} #{} {}{}",
-            audit::spec_mark(f),
-            f.number,
-            f.title.chars().take(60).collect::<String>(),
-            f.pr.as_ref()
-                .map(|p| format!("  PR #{}", p.number))
-                .unwrap_or_default()
-        );
-    }
-    if !inventory.gatilhos_pendentes.is_empty() {
-        println!("\n  Trigger labels left behind (remove them before generating):");
-        for g in &inventory.gatilhos_pendentes {
-            println!("    #{}: {}", g.number, g.labels.join(", "));
-        }
-    }
-    if !verdict.avisos.is_empty() || !verdict.bloqueios.is_empty() {
-        println!();
-    }
-    // an environment line is in the checklist above already
-    let shown: Vec<String> = environment
-        .iter()
-        .map(|c| format!("{}: {}", c.name, c.detail))
-        .collect();
-    for w in verdict.avisos.iter().filter(|w| !shown.contains(w)) {
-        println!("  ! {w}");
-    }
-    for b in verdict.bloqueios.iter().filter(|b| !shown.contains(b)) {
-        println!("  ✗ {b}");
-    }
-    if blocked {
-        println!(
-            "\n{} block(s). Fix them before generating.",
-            verdict.bloqueios.len()
-        );
-        std::process::exit(1);
-    }
-    if inventory.gerar.is_empty() {
-        println!("\nPreflight ok. Nothing to generate.");
     } else {
-        println!(
-            "\nPreflight ok. {} spec(s) to generate: `agent-mux project run <n>` on {}.",
-            inventory.gerar.len(),
-            inventory
-                .gerar
-                .iter()
-                .map(|f| format!("#{}", f.number))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        for line in preflight_lines(&s, &milestone, &read) {
+            println!("{line}");
+        }
+    }
+    if read.blocked() {
+        std::process::exit(1);
     }
     Ok(())
 }
@@ -3471,26 +3524,25 @@ fn read_spec(hub_root: &Path, item: &Item) -> (Option<String>, DocState) {
     }
 }
 
-/// `project audit --milestone M [--critique] [--critic H] [--json]
-/// [--dry-run]`: the port of spec-wave's `audit`. Writes nothing.
-async fn cmd_audit(a: &Args) -> anyhow::Result<()> {
-    use super::{audit, trail};
-    let reference = milestone_arg(a, "audit")?;
-    let as_json = a.flag("--json");
-    let critic = harness_of(
-        a.value("--critic").or(a.value("--harness")),
-        Harness::Claude,
-    )
-    .map_err(|x| anyhow::anyhow!(x))?;
-    let mut e = env(a)?;
-    if !a.flag("--cached") {
-        e.fresh = Fresh::Refresh;
-    }
-    let s = snap(&e)?;
-    let milestone = trail::resolve_milestone(&s.milestones, &reference)
-        .map_err(|x| anyhow::anyhow!(x))?
-        .clone();
-    let hub_root = steps::hub_root(&e.cfg).map_err(|x| anyhow::anyhow!(x))?;
+/// A milestone's audit, as read: what `project audit` prints and what
+/// the Milestones screen shows.
+pub struct AuditRead {
+    pub features: Vec<super::audit::Target>,
+    pub result: super::audit::Audit,
+    pub verdict: super::audit::AuditVerdict,
+}
+
+/// Reads a milestone's audit: each open Feature's spec where it is, the
+/// `#N` the snapshot does not know from GitHub, and the files of the hub
+/// and of the code repositories beside it. Writes nothing.
+pub fn audit_read(
+    tools: &Tools,
+    cfg: &ProjectConfig,
+    s: &Snapshot,
+    milestone: &super::Milestone,
+) -> Result<AuditRead, String> {
+    use super::audit;
+    let hub_root = steps::hub_root(cfg)?;
     let milestone_ref = |title: &str| {
         s.milestones
             .iter()
@@ -3520,7 +3572,7 @@ async fn cmd_audit(a: &Args) -> anyhow::Result<()> {
         title: milestone.title.clone(),
         due_on: milestone.due.clone(),
     };
-    let features: Vec<audit::Target> = milestone_features(&s, &milestone.title)
+    let features: Vec<audit::Target> = milestone_features(s, &milestone.title)
         .into_iter()
         .filter(|i| i.open)
         .map(|i| {
@@ -3535,7 +3587,10 @@ async fn cmd_audit(a: &Args) -> anyhow::Result<()> {
         })
         .collect();
     if features.is_empty() {
-        anyhow::bail!("no open Feature in milestone \"{}\"", milestone.title);
+        return Err(format!(
+            "no open Feature in milestone \"{}\"",
+            milestone.title
+        ));
     }
 
     // `#N` the catalog does not know: an issue in no milestone, a Story of
@@ -3552,8 +3607,8 @@ async fn cmd_audit(a: &Args) -> anyhow::Result<()> {
     let mut missing: Vec<u64> = Vec::new();
     if !unknown.is_empty() {
         // a read that fails stops here: it must not turn into "does not exist"
-        let found = ops::read_items(&e.tools, &e.cfg, &unknown)
-            .map_err(|x| anyhow::anyhow!("the issues the specs name could not be read: {x}"))?;
+        let found = ops::read_items(tools, cfg, &unknown)
+            .map_err(|x| format!("the issues the specs name could not be read: {x}"))?;
         for n in &unknown {
             match found.iter().find(|i| i.number == *n) {
                 Some(i) => catalog.push(entry(i)),
@@ -3567,7 +3622,7 @@ async fn cmd_audit(a: &Args) -> anyhow::Result<()> {
         prefix: String::new(),
         files: audit::list_repo_files(&hub_root),
     }];
-    for r in &e.cfg.repositories {
+    for r in &cfg.repositories {
         if let Some(dir) = hub_root
             .parent()
             .map(|p| p.join(&r.repo.repo))
@@ -3581,14 +3636,87 @@ async fn cmd_audit(a: &Args) -> anyhow::Result<()> {
     }
 
     let result = audit::audit_milestone(&features, &catalog, &missing, &repos);
-    let mut verdict = audit::audit_verdict(&result);
+    let verdict = audit::audit_verdict(&result);
+    Ok(AuditRead {
+        features,
+        result,
+        verdict,
+    })
+}
+
+/// The audit's first line.
+pub fn audit_head(s: &Snapshot, milestone: &super::Milestone, features: usize) -> String {
+    format!(
+        "Milestone \"{}\" of {}: {} Feature(s) audited",
+        milestone.title, s.hub, features
+    )
+}
+
+/// What the audit found, line by line: the graph, then the warnings and
+/// the material findings.
+pub fn audit_lines(
+    result: &super::audit::Audit,
+    verdict: &super::audit::AuditVerdict,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if !result.grafo.is_empty() {
+        out.push(String::new());
+        out.push("Dependencies among Features (read from the specs):".to_string());
+        for g in &result.grafo {
+            out.push(format!("  {}", super::audit::edge_line(g)));
+        }
+    }
+    if !verdict.avisos.is_empty() || !verdict.materiais.is_empty() {
+        out.push(String::new());
+    }
+    for w in &verdict.avisos {
+        out.push(format!("  ! {w}"));
+    }
+    for m in &verdict.materiais {
+        out.push(format!("  ✗ {m}"));
+    }
+    out
+}
+
+/// The audit's last line.
+pub fn audit_tail(verdict: &super::audit::AuditVerdict) -> String {
+    match verdict.status {
+        "problema" => format!(
+            "{} material finding(s). Decide before generating the plans.",
+            verdict.materiais.len()
+        ),
+        "aviso" => "Nothing material: look at the warnings before going on.".to_string(),
+        _ => "The milestone's dependencies close. Go on to the plans.".to_string(),
+    }
+}
+
+/// `project audit --milestone M [--critique] [--critic H] [--json]
+/// [--dry-run]`: the port of spec-wave's `audit`. Writes nothing.
+async fn cmd_audit(a: &Args) -> anyhow::Result<()> {
+    use super::{audit, trail};
+    let reference = milestone_arg(a, "audit")?;
+    let as_json = a.flag("--json");
+    let critic = harness_of(
+        a.value("--critic").or(a.value("--harness")),
+        Harness::Claude,
+    )
+    .map_err(|x| anyhow::anyhow!(x))?;
+    let mut e = env(a)?;
+    if !a.flag("--cached") {
+        e.fresh = Fresh::Refresh;
+    }
+    let s = snap(&e)?;
+    let milestone = trail::resolve_milestone(&s.milestones, &reference)
+        .map_err(|x| anyhow::anyhow!(x))?
+        .clone();
+    let hub_root = steps::hub_root(&e.cfg).map_err(|x| anyhow::anyhow!(x))?;
+    let AuditRead {
+        features,
+        result,
+        mut verdict,
+    } = audit_read(&e.tools, &e.cfg, &s, &milestone).map_err(|x| anyhow::anyhow!(x))?;
     if !as_json {
-        println!(
-            "Milestone \"{}\" of {}: {} Feature(s) audited",
-            milestone.title,
-            s.hub,
-            features.len()
-        );
+        println!("{}", audit_head(&s, &milestone, features.len()));
     }
 
     // the set critique: one session over every spec, after what a grep can do
@@ -3696,20 +3824,8 @@ async fn cmd_audit(a: &Args) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if !result.grafo.is_empty() {
-        println!("\nDependencies among Features (read from the specs):");
-        for g in &result.grafo {
-            println!("  {}", audit::edge_line(g));
-        }
-    }
-    if !verdict.avisos.is_empty() || !verdict.materiais.is_empty() {
-        println!();
-    }
-    for w in &verdict.avisos {
-        println!("  ! {w}");
-    }
-    for m in &verdict.materiais {
-        println!("  ✗ {m}");
+    for line in audit_lines(&result, &verdict) {
+        println!("{line}");
     }
     if let Some(md) = critique
         .as_ref()
@@ -3720,21 +3836,10 @@ async fn cmd_audit(a: &Args) -> anyhow::Result<()> {
             "\nThe set critique, as a comment for the issues it names (nothing was posted):\n\n{md}"
         );
     }
+    println!("\n{}", audit_tail(&verdict));
     if problem {
-        println!(
-            "\n{} material finding(s). Decide before generating the plans.",
-            verdict.materiais.len()
-        );
         std::process::exit(1);
     }
-    println!(
-        "\n{}",
-        if verdict.status == "aviso" {
-            "Nothing material: look at the warnings before going on."
-        } else {
-            "The milestone's dependencies close. Go on to the plans."
-        }
-    );
     Ok(())
 }
 

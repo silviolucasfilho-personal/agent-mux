@@ -625,3 +625,80 @@ fn the_trace_tab_reads_the_items_sessions_from_the_store() {
     let calls = std::fs::read_to_string(&f.calls).unwrap();
     assert!(!calls.contains("issue view"), "{calls}");
 }
+
+#[test]
+fn a_milestones_trail_preflight_and_audit_are_read_into_its_tabs() {
+    let mut f = fixture();
+    f.app.open_project();
+    wait(&mut f.app, "the read", |a| view(a).snap.is_some());
+    wait(&mut f.app, "the checks", |a| view(a).checks.is_some());
+    while view(&f.app).screen != Screen::Milestones {
+        f.app.handle_project_key(&key(KeyCode::Char(']')));
+    }
+    assert!(matches!(
+        view(&f.app).selected_row(),
+        Some(Row::Milestone(Some(0)))
+    ));
+    let read = |a: &App, tab: usize| view(a).milestone_read(1, tab).is_some();
+
+    // the first two tabs are the snapshot's: nothing is read for them
+    f.app.project_tick();
+    assert!(view(&f.app).milestone_pending.is_empty());
+
+    // QA trail: where each Feature stands, and that no cycle ran
+    f.app.handle_project_key(&key(KeyCode::Char('3')));
+    wait(&mut f.app, "the trail", |a| read(a, 2));
+    let trail = render(&f.app);
+    assert!(trail.contains("QA trail of \"v1\""), "{trail}");
+    assert!(trail.contains("before QA"), "{trail}");
+    assert!(trail.contains("No cycle has run."), "{trail}");
+    // with no Feature in QA, `Q` starts nothing and says why
+    f.app.handle_project_key(&key(KeyCode::Char('Q')));
+    assert!(view(&f.app).modal.is_none());
+
+    // Preflight: the environment and the inventory
+    f.app.handle_project_key(&key(KeyCode::Char('4')));
+    assert!(render(&f.app).contains("Reading the environment"));
+    wait(&mut f.app, "the preflight", |a| read(a, 3));
+    let preflight = render(&f.app);
+    assert!(preflight.contains("Preflight of acme/hub"), "{preflight}");
+    assert!(
+        preflight.contains("1 Feature(s), 0 to generate"),
+        "{preflight}"
+    );
+    assert!(preflight.contains("#1"), "{preflight}");
+
+    // Audit: the one open Feature, whose spec this folder cannot give
+    f.app.handle_project_key(&key(KeyCode::Char('5')));
+    wait(&mut f.app, "the audit", |a| read(a, 4));
+    let audit = render(&f.app);
+    assert!(audit.contains("1 Feature(s) audited"), "{audit}");
+    // one Feature is no set: `C` starts nothing
+    f.app.handle_project_key(&key(KeyCode::Char('C')));
+    assert!(view(&f.app).modal.is_none());
+
+    // `r` reads the tab again, once
+    f.app.handle_project_key(&key(KeyCode::Char('r')));
+    assert!(!read(&f.app, 4));
+    wait(&mut f.app, "the second audit", |a| read(a, 4));
+    assert_eq!(view(&f.app).milestone_reads.len(), 3);
+
+    // gh was only asked to read
+    let calls = std::fs::read_to_string(&f.calls).unwrap();
+    for line in calls.lines() {
+        let read = line.starts_with("api graphql")
+            || line.starts_with("api repos/")
+            || line.starts_with("pr list")
+            || line.starts_with("label list")
+            || line.starts_with("auth status");
+        assert!(
+            read,
+            "gh was asked for something that is not a read: {line}"
+        );
+        assert!(!line.contains("-X") && !line.contains("--method"), "{line}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(f.ws.join(".spec-wave.json")).unwrap(),
+        CONFIG
+    );
+}

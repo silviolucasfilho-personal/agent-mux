@@ -91,7 +91,7 @@ impl Screen {
     pub fn tabs(self) -> &'static [&'static str] {
         match self {
             Screen::Ready => &["Order", "Card"],
-            Screen::Milestones => &["Features", "Order"],
+            Screen::Milestones => &["Features", "Order", "QA trail", "Preflight", "Audit"],
             Screen::Health => &["Check"],
             Screen::Observability => &["30 days", "Ever"],
             _ => &["Card"],
@@ -139,6 +139,21 @@ pub const ITEM_TABS: [&str; 6] = [
 pub const TAB_THREAD: usize = 4;
 /// The Trace tab: read from the trace store when it opens.
 pub const TAB_TRACE: usize = 5;
+
+/// The Milestones screen's tabs that are read on a thread of their own.
+pub const TAB_TRAIL: usize = 2;
+pub const TAB_PREFLIGHT: usize = 3;
+pub const TAB_AUDIT: usize = 4;
+
+/// One of a milestone's read tabs (QA trail, Preflight, Audit): the lines
+/// the command of the same name prints. Nothing here writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MilestoneRead {
+    /// The milestone's number on GitHub.
+    pub milestone: u64,
+    pub tab: usize,
+    pub lines: Result<Vec<String>, String>,
+}
 
 /// The item screen: one work item over the list it was opened from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,6 +251,11 @@ pub struct ProjectView {
     proposals_at: Option<Instant>,
     dispatches_at: Option<Instant>,
     pub checks: Option<Vec<Check>>,
+    /// The read tabs of the milestones looked at since the last sync.
+    pub milestone_reads: Vec<MilestoneRead>,
+    /// The reads under way: milestone number and tab.
+    pub milestone_pending: Vec<(u64, usize)>,
+    milestone_rx: Vec<Receiver<MilestoneRead>>,
     pub syncing_since: Option<Instant>,
     /// A dialog over the screen: a picker, a line of text, the new-item
     /// form or a confirmation.
@@ -286,6 +306,9 @@ impl ProjectView {
             proposals_at: None,
             dispatches_at: None,
             checks: None,
+            milestone_reads: Vec::new(),
+            milestone_pending: Vec::new(),
+            milestone_rx: Vec::new(),
             syncing_since: None,
             modal: None,
             busy: None,
@@ -333,6 +356,38 @@ impl ProjectView {
             Row::Item { number, .. } => self.snap.as_ref()?.item(*number),
             _ => None,
         }
+    }
+
+    /// The milestone the Milestones screen's cursor is on.
+    pub fn selected_milestone(&self) -> Option<&crate::project::Milestone> {
+        if self.item.is_some() || self.screen != Screen::Milestones {
+            return None;
+        }
+        match self.selected_row()? {
+            Row::Milestone(Some(i)) => self.snap.as_ref()?.milestones.get(*i),
+            _ => None,
+        }
+    }
+
+    /// What was read for a milestone's tab, when it was.
+    pub fn milestone_read(&self, milestone: u64, tab: usize) -> Option<&MilestoneRead> {
+        self.milestone_reads
+            .iter()
+            .find(|r| r.milestone == milestone && r.tab == tab)
+    }
+
+    /// The read the pane is waiting for: the selected milestone's tab,
+    /// when it is a read tab that was neither read nor asked for.
+    pub fn milestone_due(&self) -> Option<(crate::project::Milestone, usize)> {
+        let m = self.selected_milestone()?;
+        let tab = self.tab;
+        if !(TAB_TRAIL..=TAB_AUDIT).contains(&tab)
+            || self.milestone_read(m.number, tab).is_some()
+            || self.milestone_pending.contains(&(m.number, tab))
+        {
+            return None;
+        }
+        Some((m.clone(), tab))
     }
 
     /// The item the item screen shows.
@@ -1003,6 +1058,115 @@ fn child_type(parent: Option<ItemType>) -> ItemType {
 }
 
 impl ProjectView {
+    /// A verb on a row of the Milestones screen: `r` reads the tab again,
+    /// `Q` starts the QA trail's next command, `C` the set critique.
+    fn milestone_key(&mut self, c: char, m: &crate::project::Milestone) -> Outcome {
+        use crate::project::trail;
+        let Some(snap) = &self.snap else {
+            return Outcome::None;
+        };
+        let reference = m.number.to_string();
+        match c {
+            'r' => {
+                let tab = self.tab;
+                if !(TAB_TRAIL..=TAB_AUDIT).contains(&tab) {
+                    return Outcome::Notice(
+                        "[Ctrl+R] reads the Project again; [r] reads the QA trail, Preflight and Audit tabs again".into(),
+                    );
+                }
+                if self.milestone_pending.contains(&(m.number, tab)) {
+                    return Outcome::Notice("it is being read".into());
+                }
+                // the tick sees a tab with nothing read and reads it
+                self.milestone_reads
+                    .retain(|r| !(r.milestone == m.number && r.tab == tab));
+                Outcome::None
+            }
+            'Q' => {
+                let features = trail_features(snap, &m.title);
+                let in_qa = features
+                    .iter()
+                    .filter(|f| f.scope == trail::Scope::InCycle)
+                    .count();
+                if in_qa == 0 {
+                    return Outcome::Notice(format!(
+                        "\"{}\": no Feature is in QA, so a cycle has nothing to test",
+                        m.title
+                    ));
+                }
+                let waiting = trail::run_gate(&features);
+                let list = |n: &[u64]| {
+                    n.iter()
+                        .map(|n| format!("#{n}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                self.modal = Some(if waiting.is_empty() {
+                    Modal::Confirm {
+                        lines: vec![
+                            format!("Run a QA cycle of milestone \"{}\"?", m.title),
+                            format!("{in_qa} Feature(s) in QA. Each is tested by `agent-mux project qa` in a worktree of its own; a later cycle tests only what changed since the last."),
+                            "Each run writes what a QA run writes: the report on the issue, `qa-approved` and the board move when green, one Bug per failed scenario when red.".into(),
+                            "The cycle's report is published by pull request and summarized in the milestone's description.".into(),
+                        ],
+                        op: Op::Process {
+                            number: 0,
+                            args: vec!["qa-trail".into(), "run".into(), reference],
+                            what: "the QA cycle".into(),
+                        },
+                    }
+                } else {
+                    Modal::Confirm {
+                        lines: vec![
+                            format!("Write the QA plans milestone \"{}\" lacks?", m.title),
+                            format!("A cycle starts only with every Feature in QA released, and {} is not.", list(&waiting)),
+                            "For each Feature with a merged spec and plan, a read-only session writes qa-plan.md and a second one audits it; a clean audit adds `spec-wave:qa-ready`. A plan that is already there is audited as it is.".into(),
+                            "Each plan is published by pull request; nothing is written to your checkout.".into(),
+                        ],
+                        op: Op::Process {
+                            number: 0,
+                            args: vec!["qa-trail".into(), "plan".into(), reference],
+                            what: "the QA plans".into(),
+                        },
+                    }
+                });
+                Outcome::None
+            }
+            _ => {
+                let open = milestone_features(snap, Some(&m.title)).len();
+                if open < 2 {
+                    return Outcome::Notice(format!(
+                        "\"{}\": the set critique reads the specs against each other, and there {} open Feature",
+                        m.title,
+                        if open == 0 {
+                            "is no".to_string()
+                        } else {
+                            "is one".to_string()
+                        }
+                    ));
+                }
+                self.modal = Some(Modal::Confirm {
+                    lines: vec![
+                        format!("Run the set critique of milestone \"{}\"?", m.title),
+                        format!("The audit is read again, then one read-only session on Claude Code reads the specs of the {open} open Features against each other."),
+                        "Its findings are written to the command's output as a comment ready for the issues. Nothing is posted and no file changes.".into(),
+                    ],
+                    op: Op::Process {
+                        number: 0,
+                        args: vec![
+                            "audit".into(),
+                            "--milestone".into(),
+                            reference,
+                            "--critique".into(),
+                        ],
+                        what: "the set critique".into(),
+                    },
+                });
+                Outcome::None
+            }
+        }
+    }
+
     /// The item a verb acts on: the item screen's, else the row's.
     pub fn target(&self) -> Option<&Item> {
         if self.item.is_some() {
@@ -1035,6 +1199,7 @@ impl ProjectView {
                     | 'I'
                     | 'Q'
             )
+            && !(c == 'C' && self.selected_milestone().is_some())
         {
             return None;
         }
@@ -1043,6 +1208,11 @@ impl ProjectView {
         }
         if let Some(what) = &self.busy {
             return Some(Outcome::Notice(format!("wait: {what}")));
+        }
+        if let Some(m) = self.selected_milestone().cloned()
+            && matches!(c, 'r' | 'Q' | 'C')
+        {
+            return Some(self.milestone_key(c, &m));
         }
         let target = self.target().cloned();
         let need = |what: &str| Some(Outcome::Notice(format!("select an item to {what}")));
@@ -2543,6 +2713,92 @@ pub fn decompose_groups(s: &Snapshot) -> Groups<'_> {
     ]
 }
 
+/// A milestone's Features as the QA trail's gate needs them.
+pub fn trail_features(s: &Snapshot, title: &str) -> Vec<crate::project::trail::TrailFeature> {
+    use crate::project::trail;
+    let mut out: Vec<trail::TrailFeature> = s
+        .items
+        .iter()
+        .filter(|i| i.item_type == Some(ItemType::Feature) && i.milestone.as_deref() == Some(title))
+        .map(|i| trail::TrailFeature {
+            number: i.number,
+            title: i.title.clone(),
+            labels: i.labels.clone(),
+            scope: trail::classify_scope(i.stage.as_deref()),
+        })
+        .collect();
+    out.sort_by_key(|f| f.number);
+    out
+}
+
+/// The QA trail tab: where each Feature of the milestone stands for a
+/// cycle, what `Q` would start, and the last cycle's report.
+pub fn trail_lines(
+    s: &Snapshot,
+    m: &crate::project::Milestone,
+    cycles: &std::collections::BTreeMap<u32, crate::project::trail::Report>,
+) -> Vec<String> {
+    use crate::project::{DocState, trail};
+    let features = trail_features(s, &m.title);
+    let mut out = vec![format!("QA trail of \"{}\"", m.title)];
+    if features.is_empty() {
+        out.push("  no Feature".to_string());
+    }
+    for f in &features {
+        let has_docs = s.item(f.number).is_some_and(|i| {
+            i.doc_state("spec") == DocState::Base && i.doc_state("plan") == DocState::Base
+        });
+        out.push(format!(
+            "  #{:<5} {:<10} {}  {}",
+            f.number,
+            match f.scope {
+                trail::Scope::Outside => "before QA",
+                trail::Scope::InCycle => "in QA",
+                trail::Scope::Approved => "past QA",
+            },
+            trail::classify_for_plan(&f.labels, has_docs).label(),
+            crate::project::contract::strip_tag(&f.title)
+        ));
+    }
+    let in_qa = features
+        .iter()
+        .filter(|f| f.scope == trail::Scope::InCycle)
+        .count();
+    let waiting = trail::run_gate(&features);
+    out.push(String::new());
+    out.push(if in_qa == 0 {
+        "No Feature is in QA: a cycle has nothing to test.".to_string()
+    } else if waiting.is_empty() {
+        format!("{in_qa} Feature(s) in QA, every plan released: [Q] runs a cycle.")
+    } else {
+        format!(
+            "A cycle waits on the QA plan of {}: [Q] writes and audits the plans.",
+            waiting
+                .iter()
+                .map(|n| format!("#{n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
+    out.push(String::new());
+    match cycles.values().next_back() {
+        None => out.push("No cycle has run.".to_string()),
+        Some(last) => {
+            out.push(format!(
+                "Cycles: {}",
+                cycles
+                    .values()
+                    .map(|r| format!("{} ({})", r.cycle, r.verdict))
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            ));
+            out.push(String::new());
+            out.extend(trail::render_md(last).lines().map(str::to_string));
+        }
+    }
+    out
+}
+
 /// The open Features of a milestone (`None`: of no milestone).
 pub fn milestone_features<'a>(s: &'a Snapshot, title: Option<&str>) -> Vec<&'a Item> {
     let mut out: Vec<&Item> = s
@@ -2691,6 +2947,60 @@ impl App {
             let _ = tx.send(read.clone());
             let probe = doctor::probe(&tools, &cfg);
             let _ = htx.send(doctor::checks(&cfg, &read, &probe));
+        });
+    }
+
+    /// Reads the selected milestone's tab (QA trail, Preflight, Audit) on a
+    /// thread of its own, once: the tick takes the lines. Only reads.
+    fn project_load_milestone(&mut self) {
+        let tools = self.project_tools();
+        let Mode::Project(view) = &mut self.mode else {
+            return;
+        };
+        let Some((milestone, tab)) = view.milestone_due() else {
+            return;
+        };
+        let (Some(cfg), Some(snap)) = (view.cfg.clone(), view.snap.clone()) else {
+            return;
+        };
+        let scratch = view.scratch.clone();
+        let (tx, rx) = channel();
+        view.milestone_pending.push((milestone.number, tab));
+        view.milestone_rx.push(rx);
+        std::thread::spawn(move || {
+            let lines = match tab {
+                TAB_TRAIL => {
+                    use crate::project::trail;
+                    // with no checkout of the hub, the cycles kept here
+                    let cycles = match crate::project::run::hub_root(&cfg) {
+                        Ok(root) => trail::cycles(&scratch, &snap.hub, &root, &milestone.title),
+                        Err(_) => trail::kept(&scratch, &snap.hub, &milestone.title),
+                    };
+                    Ok(trail_lines(&snap, &milestone, &cycles))
+                }
+                TAB_PREFLIGHT => {
+                    let read = cli::preflight_read(
+                        &tools,
+                        &cfg,
+                        &snap,
+                        &milestone,
+                        crate::harness::Harness::Claude,
+                    );
+                    Ok(cli::preflight_lines(&snap, &milestone, &read))
+                }
+                _ => cli::audit_read(&tools, &cfg, &snap, &milestone).map(|a| {
+                    let mut out = vec![cli::audit_head(&snap, &milestone, a.features.len())];
+                    out.extend(cli::audit_lines(&a.result, &a.verdict));
+                    out.push(String::new());
+                    out.push(cli::audit_tail(&a.verdict));
+                    out
+                }),
+            };
+            let _ = tx.send(MilestoneRead {
+                milestone: milestone.number,
+                tab,
+                lines,
+            });
         });
     }
 
@@ -2875,10 +3185,27 @@ impl App {
 
     /// On the tick: results of reads that finished.
     pub fn project_tick(&mut self) {
+        self.project_load_milestone();
         let Mode::Project(view) = &mut self.mode else {
             return;
         };
         let mut notice = None;
+        let mut read = Vec::new();
+        view.milestone_rx.retain(|rx| match rx.try_recv() {
+            Ok(r) => {
+                read.push(r);
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(_) => false,
+        });
+        for r in read {
+            view.milestone_pending
+                .retain(|p| *p != (r.milestone, r.tab));
+            view.milestone_reads
+                .retain(|x| !(x.milestone == r.milestone && x.tab == r.tab));
+            view.milestone_reads.push(r);
+        }
         if let Some(rx) = &view.sync_rx
             && let Ok(result) = rx.try_recv()
         {
@@ -2888,6 +3215,8 @@ impl App {
                 Ok(snap) => {
                     view.snap = Some(snap);
                     view.sync_error = None;
+                    // what was read of a milestone was read of the old one
+                    view.milestone_reads.clear();
                 }
                 Err(e) => {
                     notice = Some(Notice::error(format!("project: {e}")));
@@ -3654,6 +3983,139 @@ mod tests {
             op,
             Op::Process { args, .. } if args == &["run", &story.1.to_string(), "--step", "qa-plan"]
         ));
+    }
+
+    #[test]
+    fn a_milestone_row_has_read_tabs_and_keys_for_the_trail_and_the_critique() {
+        let mut v = view();
+        v.screen = Screen::Milestones;
+        v.rebuild();
+        let m = v.selected_milestone().expect("the open milestone").clone();
+        assert_eq!(v.screen.tabs().len(), 5);
+        // the snapshot's tabs ask for no read; a read tab asks once
+        assert!(v.milestone_due().is_none());
+        v.handle_key(&key(KeyCode::Char('4')));
+        assert_eq!(v.milestone_due(), Some((m.clone(), TAB_PREFLIGHT)));
+        v.milestone_pending.push((m.number, TAB_PREFLIGHT));
+        assert!(v.milestone_due().is_none());
+        assert!(matches!(
+            v.handle_key(&key(KeyCode::Char('r'))),
+            Outcome::Notice(n) if n.contains("being read")
+        ));
+        v.milestone_pending.clear();
+        v.milestone_reads.push(MilestoneRead {
+            milestone: m.number,
+            tab: TAB_PREFLIGHT,
+            lines: Ok(vec!["Preflight ok.".into()]),
+        });
+        assert!(v.milestone_due().is_none());
+        // `r` drops what was read, so the tick reads it again
+        assert_eq!(v.handle_key(&key(KeyCode::Char('r'))), Outcome::None);
+        assert_eq!(v.milestone_due(), Some((m.clone(), TAB_PREFLIGHT)));
+
+        // no Feature in QA: a cycle has nothing to test
+        assert!(matches!(
+            v.handle_key(&key(KeyCode::Char('Q'))),
+            Outcome::Notice(n) if n.contains("no Feature is in QA")
+        ));
+        // in QA with no released plan: the plans first
+        let feature = milestone_features(v.snap.as_ref().unwrap(), Some(&m.title))[0].number;
+        let set = |v: &mut ProjectView, f: &dyn Fn(&mut Item)| {
+            for i in v.snap.as_mut().unwrap().items.iter_mut() {
+                if i.number == feature {
+                    f(i);
+                }
+            }
+        };
+        set(&mut v, &|i| i.stage = Some(STAGE_QA.to_string()));
+        v.handle_key(&key(KeyCode::Char('Q')));
+        let Some(Modal::Confirm { lines, op }) = v.modal.take() else {
+            panic!("no confirmation")
+        };
+        assert!(lines[1].contains(&format!("#{feature}")), "{lines:?}");
+        let number = m.number.to_string();
+        assert!(matches!(
+            &op,
+            Op::Process { number: 0, args, .. } if args == &["qa-trail", "plan", number.as_str()]
+        ));
+        // released: a cycle
+        set(&mut v, &|i| i.labels.push(LABEL_QA_READY.to_string()));
+        v.handle_key(&key(KeyCode::Char('Q')));
+        let Some(Modal::Confirm { lines, op }) = v.modal.take() else {
+            panic!("no confirmation")
+        };
+        assert!(lines[0].contains("Run a QA cycle"), "{lines:?}");
+        assert!(matches!(
+            &op,
+            Op::Process { args, .. } if args == &["qa-trail", "run", number.as_str()]
+        ));
+
+        // the set critique needs two open Features
+        assert!(matches!(
+            v.handle_key(&key(KeyCode::Char('C'))),
+            Outcome::Notice(n) if n.contains("is one open Feature")
+        ));
+        let mut second = v.snap.as_ref().unwrap().item(feature).unwrap().clone();
+        second.number = 9001;
+        v.snap.as_mut().unwrap().items.push(second);
+        v.handle_key(&key(KeyCode::Char('C')));
+        let Some(Modal::Confirm { lines, op }) = v.modal.take() else {
+            panic!("no confirmation")
+        };
+        assert!(
+            lines.iter().any(|l| l.contains("Nothing is posted")),
+            "{lines:?}"
+        );
+        assert!(matches!(
+            &op,
+            Op::Process { args, .. }
+                if args == &["audit", "--milestone", number.as_str(), "--critique"]
+        ));
+
+        // `C` is a verb only on a milestone's row
+        v.screen = Screen::Board;
+        v.rebuild();
+        assert_eq!(v.handle_key(&key(KeyCode::Char('C'))), Outcome::None);
+        assert!(v.modal.is_none());
+    }
+
+    #[test]
+    fn the_trail_tab_says_where_each_feature_stands_and_shows_the_last_cycle() {
+        use crate::project::trail;
+        let mut s = snapshot::build(&fixture::raw(), &fixture::cfg(), 1);
+        let m = s.milestones.iter().find(|m| m.open).unwrap().clone();
+        let feature = milestone_features(&s, Some(&m.title))[0].number;
+        let none = std::collections::BTreeMap::new();
+        let text = trail_lines(&s, &m, &none).join("\n");
+        assert!(text.contains(&format!("#{feature}")), "{text}");
+        assert!(text.contains("No Feature is in QA"), "{text}");
+        assert!(text.contains("No cycle has run."), "{text}");
+
+        for i in s.items.iter_mut() {
+            if i.number == feature {
+                i.stage = Some(STAGE_QA.to_string());
+            }
+        }
+        let report = trail::build_report(trail::ReportInput {
+            milestone_number: m.number,
+            milestone_title: m.title.clone(),
+            cycle: 1,
+            ..Default::default()
+        });
+        let cycles = std::collections::BTreeMap::from([(1, report.clone())]);
+        let text = trail_lines(&s, &m, &cycles).join("\n");
+        assert!(
+            text.contains(&format!("A cycle waits on the QA plan of #{feature}")),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("Cycles: 1 ({})", report.verdict)),
+            "{text}"
+        );
+        assert!(
+            text.contains(trail::render_md(&report).lines().next().unwrap()),
+            "{text}"
+        );
     }
 
     #[test]
