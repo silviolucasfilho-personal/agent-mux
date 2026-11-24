@@ -229,7 +229,7 @@ pub fn fingerprint(kind: Kind, anchor: Option<&str>, text: &str) -> String {
 }
 
 /// A Latin letter without its diacritic, as NFD and a strip would leave it.
-fn fold(c: char) -> char {
+pub(crate) fn fold(c: char) -> char {
     match c {
         'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' => 'a',
         'À' | 'Á' | 'Â' | 'Ã' | 'Ä' | 'Å' => 'A',

@@ -9,7 +9,7 @@ output = "work"
 default_isolation = "none"
 
 [args.kind]
-description = "What is audited: plan, spec, bug, stories or qa (a QA plan)."
+description = "What is audited: plan, spec, bug, stories, qa (a QA plan) or conjunto (the specs of a milestone as a set)."
 required = true
 [args.document]
 description = "The document, as it is."
