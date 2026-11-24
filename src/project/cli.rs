@@ -66,6 +66,18 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
         Bug per failed scenario under the Story, and the item stays in QA. Blocked
         with no failure: nothing moves
 
+  agent-mux project qa-trail plan <milestone> [--harness H] [--critic H] [--dry-run]
+        the QA of a milestone, by its number or title: write and audit the QA plan
+        of each Feature that has none (the qa-plan step), and say which are ready
+  agent-mux project qa-trail run <milestone> [--only f1,f2] [--max-cycles N] [--parallel N] [--harness H] [--dry-run]
+        one cycle: `project qa` on every Feature of the milestone that is in QA,
+        each a process of its own, only when all of them are qa-ready. Writes the
+        cycle's report (a pull request under docs/qa/) and the block in the
+        milestone's description. A later cycle tests only what may have changed
+        (a Bug closed, a blocked scenario) and refuses to start when nothing did
+  agent-mux project qa-trail report <milestone> [--cycle N] [--json]
+        print a cycle's report, the last one by default
+
   agent-mux project insights [<n>] [--scope progress|tech|daily|brainstorm] [--topic \"…\"] [--harness H] [--dry-run]
         a read-only session reads where the Project stands (or one item and what is
         under it) and says what matters; the answer is shown and kept as a file.
@@ -141,6 +153,9 @@ const VALUE_FLAGS: &[&str] = &[
     "--scope",
     "--topic",
     "--only",
+    "--max-cycles",
+    "--cycle",
+    "--parallel",
 ];
 
 struct Args {
@@ -403,6 +418,7 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
         Some("fleet") => cmd_fleet(&a),
         Some("insights") => cmd_insights(&a).await,
         Some("qa") => cmd_qa(&a).await,
+        Some("qa-trail") => cmd_qa_trail(&a).await,
         Some("estimate") => cmd_assist(&a, super::assist::Kind::Estimate).await,
         Some("refine") => cmd_assist(&a, super::assist::Kind::Refine).await,
         None | Some("help") | Some("--help") | Some("-h") => {
@@ -1536,6 +1552,727 @@ async fn cmd_qa(a: &Args) -> anyhow::Result<()> {
     println!("  verdict: {}", verdict.as_str());
     if verdict != Verdict::Pass {
         anyhow::bail!("#{n}: QA did not pass ({})", verdict.as_str());
+    }
+    Ok(())
+}
+/// `agent-mux project qa-trail plan|run|report <milestone>`: the QA of a
+/// milestone (spec §34), the port of spec-wave's `qa-lead`. `plan` writes
+/// the QA plans that are missing; `run` is one cycle of `project qa` over
+/// the Features in QA; `report` prints a cycle's report.
+async fn cmd_qa_trail(a: &Args) -> anyhow::Result<()> {
+    use super::trail;
+    use std::collections::BTreeMap;
+    let action = a.positional.first().map(String::as_str).unwrap_or("");
+    if !matches!(action, "plan" | "run" | "report") {
+        anyhow::bail!(
+            "usage: agent-mux project qa-trail plan|run|report <milestone> (its number, or its title)"
+        );
+    }
+    let reference = a.positional.get(1..).unwrap_or_default().join(" ");
+    if reference.is_empty() {
+        anyhow::bail!(
+            "which milestone? give its number or its title: `agent-mux project qa-trail {action} <milestone>`"
+        );
+    }
+    let mut e = env(a)?;
+    if action != "report" && !a.flag("--cached") {
+        // a cycle is decided on what GitHub says now
+        e.fresh = Fresh::Refresh;
+    }
+    let s = snap(&e)?;
+    let milestone = trail::resolve_milestone(&s.milestones, &reference)
+        .map_err(|x| anyhow::anyhow!(x))?
+        .clone();
+    let hub_root = steps::hub_root(&e.cfg).map_err(|x| anyhow::anyhow!(x))?;
+    let scratch = steps::scratch_dir(&crate::tracing::analysis::default_snapshot_dir());
+
+    if action == "report" {
+        let all = trail::cycles(&scratch, &s.hub, &hub_root, &milestone.title);
+        let wanted =
+            match a.value("--cycle") {
+                Some(raw) => Some(raw.parse::<u32>().ok().filter(|c| *c > 0).ok_or_else(|| {
+                    anyhow::anyhow!("--cycle takes a cycle number: got \"{raw}\"")
+                })?),
+                None => None,
+            };
+        let report = match wanted {
+            Some(c) => all.get(&c).ok_or_else(|| {
+                anyhow::anyhow!("cycle {c} of milestone \"{}\" was not found", milestone.title)
+            })?,
+            None => all.values().next_back().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no cycle has run for milestone \"{}\": start one with `agent-mux project qa-trail run`",
+                    milestone.title
+                )
+            })?,
+        };
+        if a.flag("--json") {
+            print!("{}", trail::render_json(report));
+        } else {
+            println!("{}", trail::render_md(report));
+        }
+        return Ok(());
+    }
+
+    // the trail: the milestone's Features, in the order of their Stories
+    let features: Vec<&Item> = s
+        .items
+        .iter()
+        .filter(|i| {
+            i.item_type == Some(ItemType::Feature)
+                && i.milestone.as_deref() == Some(milestone.title.as_str())
+        })
+        .collect();
+    if features.is_empty() {
+        println!(
+            "milestone \"{}\" has no Feature: nothing to do",
+            milestone.title
+        );
+        return Ok(());
+    }
+    let mut numbers: Vec<u64> = features.iter().map(|f| f.number).collect();
+    numbers.sort_unstable();
+    let stories: Vec<(u64, u64, Vec<u64>)> = numbers
+        .iter()
+        .flat_map(|f| {
+            s.children_of(*f)
+                .into_iter()
+                .filter(|c| c.item_type == Some(ItemType::Story))
+                .map(|c| (c.number, *f, c.depends_on.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let ordered: Vec<&Item> = trail::feature_order(&numbers, &stories)
+        .into_iter()
+        .filter_map(|n| s.item(n))
+        .collect();
+    let exe = match std::env::var_os("AGENT_MUX_PROJECT_EXE") {
+        Some(p) => PathBuf::from(p),
+        None => std::env::current_exe()?,
+    };
+    let root = e.cfg.root().to_path_buf();
+    let dry = a.flag("--dry-run");
+
+    if action == "plan" {
+        use super::DocState;
+        let classify = |i: &Item| {
+            trail::classify_for_plan(
+                &i.labels,
+                i.doc_state("spec") == DocState::Base && i.doc_state("plan") == DocState::Base,
+            )
+        };
+        let mut states: Vec<(u64, String, trail::PlanState, Option<String>)> = ordered
+            .iter()
+            .map(|i| (i.number, i.title.clone(), classify(i), None))
+            .collect();
+        let mut ran = false;
+        for (n, _, state, note) in states.iter_mut() {
+            if *state != trail::PlanState::Generate {
+                continue;
+            }
+            if dry {
+                println!("dry-run: would run `agent-mux project run {n} --step qa-plan`");
+                continue;
+            }
+            println!("Feature #{n}: writing and auditing its QA plan");
+            let mut cmd = std::process::Command::new(&exe);
+            cmd.args([
+                "project",
+                "run",
+                &n.to_string(),
+                "--step",
+                "qa-plan",
+                "--dir",
+            ])
+            .arg(&root)
+            .stdin(std::process::Stdio::null());
+            for flag in ["--harness", "--critic"] {
+                if let Some(v) = a.value(flag) {
+                    cmd.args([flag, v]);
+                }
+            }
+            ran = true;
+            match cmd.status() {
+                Ok(st) if st.success() => {}
+                Ok(st) => *note = Some(format!("the step ended with {st}")),
+                Err(x) => *note = Some(format!("the step did not start: {x}")),
+            }
+        }
+        if ran {
+            // what the steps left on the issues
+            let after = obtain(&e.conn, &e.tools, &e.cfg, Fresh::Refresh)
+                .map_err(|x| anyhow::anyhow!(x))?;
+            for (n, _, state, _) in states.iter_mut() {
+                if let Some(i) = after.item(*n) {
+                    *state = classify(i);
+                }
+            }
+        }
+        println!(
+            "\nreadiness of the trail: milestone \"{}\" ({} Feature(s), in the trail's order)\n",
+            milestone.title,
+            states.len()
+        );
+        for (n, title, state, note) in &states {
+            println!("  #{n} {title}");
+            // a plan that was written and not released says why above
+            let label = if *state == trail::PlanState::Generate && !dry && ran {
+                "✗ not released: see the step's output above"
+            } else {
+                state.label()
+            };
+            println!("    {label}");
+            if let Some(note) = note {
+                println!("    ! {note}");
+            }
+        }
+        let gated: Vec<String> = states
+            .iter()
+            .filter(|x| x.2 == trail::PlanState::HumanGate)
+            .map(|x| format!("#{}", x.0))
+            .collect();
+        if !gated.is_empty() {
+            println!(
+                "\n⛔ a person must act on {}: correct the document the 🔎 comment names and remove the label",
+                gated.join(", ")
+            );
+        }
+        let ready = states
+            .iter()
+            .filter(|x| x.2 == trail::PlanState::Ready)
+            .count();
+        println!(
+            "\n{ready}/{} ready. {}",
+            states.len(),
+            if ready == states.len() {
+                "Review each qa-plan.md, merge its pull request, then `agent-mux project qa-trail run`."
+            } else {
+                "A cycle starts only when every Feature in QA has `spec-wave:qa-ready`."
+            }
+        );
+        if !dry && ready != states.len() {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    // ---- run: one cycle
+    let settings = trail::settings(&e.cfg);
+    let max_cycles = match a.value("--max-cycles") {
+        Some(raw) => raw.parse::<u32>().ok().filter(|c| *c > 0).ok_or_else(|| {
+            anyhow::anyhow!("--max-cycles takes a number above zero: got \"{raw}\"")
+        })?,
+        None => settings.max_cycles,
+    };
+    let parallel = match a.value("--parallel") {
+        Some(raw) => raw
+            .parse::<usize>()
+            .ok()
+            .filter(|c| *c > 0)
+            .ok_or_else(|| {
+                anyhow::anyhow!("--parallel takes a number above zero: got \"{raw}\"")
+            })?,
+        None => settings.max_parallel,
+    };
+    let harness =
+        harness_of(a.value("--harness"), Harness::Claude).map_err(|x| anyhow::anyhow!(x))?;
+    if let Some(why) = &s.board_error {
+        println!("! the board was not read ({why}): every Feature counts as outside the cycle");
+    }
+    let mut the_trail: Vec<trail::TrailFeature> = ordered
+        .iter()
+        .map(|i| trail::TrailFeature {
+            number: i.number,
+            title: i.title.clone(),
+            labels: i.labels.clone(),
+            scope: trail::classify_scope(i.stage.as_deref()),
+        })
+        .collect();
+    if let Some(raw) = a.value("--only") {
+        let wanted: Vec<u64> = raw
+            .split(',')
+            .map(|x| x.trim().trim_start_matches('#').parse::<u64>())
+            .collect::<Result<_, _>>()
+            .map_err(|_| {
+                anyhow::anyhow!("--only takes Feature numbers, as 12 or 12,15: got \"{raw}\"")
+            })?;
+        let unknown: Vec<String> = wanted
+            .iter()
+            .filter(|n| !the_trail.iter().any(|t| t.number == **n))
+            .map(|n| format!("#{n}"))
+            .collect();
+        if !unknown.is_empty() {
+            anyhow::bail!(
+                "--only names Feature(s) that are not of the milestone: {}",
+                unknown.join(", ")
+            );
+        }
+        the_trail.retain(|t| wanted.contains(&t.number));
+    }
+    let missing = trail::run_gate(&the_trail);
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "Feature(s) in QA without `{}`: {}. A cycle starts only with the whole trail reviewed: run `agent-mux project qa-trail plan` and review the plans",
+            super::contract::LABEL_QA_READY,
+            missing
+                .iter()
+                .map(|n| format!("#{n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let in_cycle: Vec<&trail::TrailFeature> = the_trail
+        .iter()
+        .filter(|t| t.scope == trail::Scope::InCycle)
+        .collect();
+    let previous = trail::cycles(&scratch, &s.hub, &hub_root, &milestone.title)
+        .into_values()
+        .next_back();
+    let cycle = previous.as_ref().map_or(0, |p| p.cycle) + 1;
+
+    // the Bugs of the cycle before: the closed ones are what changed
+    let mut previous_bugs: Vec<u64> = previous
+        .iter()
+        .flat_map(|p| {
+            p.features
+                .iter()
+                .flat_map(|f| f.bugs_opened.clone())
+                .chain(p.bugs.open_blocking.clone())
+        })
+        .collect();
+    previous_bugs.sort_unstable();
+    previous_bugs.dedup();
+    let mut closed_bodies: Vec<String> = Vec::new();
+    let mut still_open: Vec<u64> = Vec::new();
+    for n in &previous_bugs {
+        match super::github::issue_state(&e.tools, &e.cfg, *n) {
+            Ok((true, _)) => still_open.push(*n),
+            Ok((false, body)) => closed_bodies.push(body),
+            // a Bug that cannot be read is neither closed nor a blocker
+            Err(x) => println!("! Bug #{n} was not read: {x}"),
+        }
+    }
+    let closed = closed_bodies.len() as u32;
+    trail::next_cycle_gate(previous.as_ref(), closed, max_cycles)
+        .map_err(|why| anyhow::anyhow!("cycle {cycle} does not start: {why}"))?;
+
+    let comments_of = |n: u64| -> super::qa::LastReport {
+        super::github::issue_detail(&e.tools, &e.cfg, n)
+            .map(|d| super::qa::parse_last_report(&d.comments))
+            .unwrap_or_default()
+    };
+    let targets: Vec<trail::Target> = match &previous {
+        None => in_cycle
+            .iter()
+            .map(|t| trail::Target {
+                issue: t.number,
+                feature: Some(t.number),
+                only: None,
+                motivo: "ciclo-1",
+            })
+            .collect(),
+        Some(p) => {
+            let mut blocked: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
+            for t in &in_cycle {
+                blocked.insert(
+                    t.number,
+                    comments_of(t.number)
+                        .results
+                        .values()
+                        .filter(|r| r.verdict == super::qa::Verdict::Blocked)
+                        .map(|r| r.numero)
+                        .collect(),
+                );
+            }
+            let tested: Vec<trail::FeatureEntry> = p
+                .features
+                .iter()
+                .filter(|f| in_cycle.iter().any(|t| t.number == f.issue))
+                .cloned()
+                .collect();
+            trail::retest_plan(&tested, &blocked, &closed_bodies)
+        }
+    };
+    let feature_of = |t: &trail::Target| -> Option<u64> {
+        t.feature
+            .or_else(|| s.ancestor(t.issue, ItemType::Feature).map(|f| f.number))
+    };
+
+    println!(
+        "qa-trail run: milestone \"{}\", cycle {cycle}/{max_cycles}, on {}",
+        milestone.title,
+        harness.as_str()
+    );
+    println!(
+        "  Features in the cycle: {}",
+        if in_cycle.is_empty() {
+            "none".to_string()
+        } else {
+            in_cycle
+                .iter()
+                .map(|t| format!("#{}", t.number))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    );
+    for t in the_trail
+        .iter()
+        .filter(|t| t.scope != trail::Scope::InCycle)
+    {
+        println!("    #{}: {}", t.number, t.scope.as_str());
+    }
+    println!(
+        "  {} target(s), up to {parallel} at once, each in a worktree of its own:",
+        targets.len()
+    );
+    for t in &targets {
+        println!("    - {}", t.line());
+    }
+    if dry {
+        println!("  dry-run: nothing ran and nothing was written");
+        return Ok(());
+    }
+    if targets.is_empty() && in_cycle.is_empty() {
+        println!("  no Feature of this milestone is in QA: nothing to run");
+        return Ok(());
+    }
+
+    let now_iso = || {
+        time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default()
+    };
+    let started_at = now_iso();
+    let planned = |title: &str| -> u32 {
+        let path = format!(
+            "{}/qa-plan.md",
+            super::contract::doc_dir(ItemType::Feature, title)
+        );
+        super::deliver::read_base_file(&hub_root, &path)
+            .ok()
+            .flatten()
+            .and_then(|c| super::qa_plan::parse(&c).ok())
+            .map_or(0, |p| p.scenarios.len() as u32)
+    };
+    let outside: Vec<trail::FeatureEntry> = the_trail
+        .iter()
+        .filter(|t| t.scope != trail::Scope::InCycle)
+        .map(|t| trail::out_of_cycle_entry(t.number, &t.title, t.scope))
+        .collect();
+    let publish = |report: &trail::Report| {
+        match trail::keep(&scratch, &s.hub, report) {
+            Ok(file) => println!("  cycle {} kept in {}", report.cycle, file.display()),
+            Err(x) => println!("  ! the report was not kept: {x}"),
+        }
+        let dir = trail::trail_dir(&milestone.title, report.cycle);
+        let md = format!("{dir}/report.md");
+        let published = super::deliver::publish(
+            &e.tools,
+            &hub_root,
+            &scratch,
+            &super::deliver::Artifact {
+                doc: &format!("qa-trail-c{}", report.cycle),
+                number: milestone.number,
+                issue_title: &format!("milestone \"{}\"", milestone.title),
+                issue_url: &format!(
+                    "https://github.com/{}/milestone/{}",
+                    s.hub, milestone.number
+                ),
+                path: &md,
+                content: &trail::render_md(report),
+                next_step: None,
+                extra: &[(format!("{dir}/report.json"), trail::render_json(report))],
+            },
+        );
+        match published {
+            Ok(p) => println!(
+                "  report published on {}{}",
+                p.branch,
+                p.pr_url
+                    .map(|u| format!(": {u}"))
+                    .or(p.pr_error.map(|x| format!(" (! no pull request: {x})")))
+                    .unwrap_or_default()
+            ),
+            Err(x) => println!("  ! the report was not published: {x}"),
+        }
+        let block = trail::milestone_block(report, &md);
+        let written = super::github::milestone_description(&e.tools, &e.cfg, milestone.number)
+            .and_then(|now| {
+                super::write::set_milestone_description(
+                    &e.tools,
+                    &e.cfg,
+                    milestone.number,
+                    &trail::upsert_block(&now, &block),
+                )
+            });
+        match written {
+            Ok(()) => println!("  the milestone's description has the cycle's block"),
+            Err(x) => println!("  ! the milestone's description was not updated: {x}"),
+        }
+    };
+
+    // preflight: what would abort every target alike
+    let mut checks = vec![trail::Check {
+        name: format!("harness {}", harness.as_str()),
+        ok: crate::session::command_available(harness.command()),
+        detail: String::new(),
+    }];
+    if !checks[0].ok {
+        checks[0].detail = format!("`{}` is not on PATH", harness.command());
+    }
+    let free_mb = std::process::Command::new("df")
+        .arg("-Pk")
+        .arg(scratch.parent().unwrap_or(&root))
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .last()?
+                .split_whitespace()
+                .nth(3)?
+                .parse::<u64>()
+                .ok()
+        })
+        .map(|kb| kb / 1024);
+    checks.push(trail::Check {
+        name: "espaço em disco".into(),
+        ok: free_mb.is_none_or(|mb| mb > 1024),
+        detail: free_mb.map_or("não verificável".into(), |mb| format!("{mb}MB livres")),
+    });
+    let preflight = trail::Preflight::of(checks);
+    if !preflight.ok {
+        let mut entries: Vec<trail::FeatureEntry> = in_cycle
+            .iter()
+            .map(|t| trail::aborted_entry(t.number, &t.title, planned(&t.title), None))
+            .collect();
+        entries.extend(outside);
+        let report = trail::build_report(trail::ReportInput {
+            milestone_number: milestone.number,
+            milestone_title: milestone.title.clone(),
+            cycle,
+            started_at: Some(started_at),
+            finished_at: Some(now_iso()),
+            preflight: preflight.clone(),
+            features: entries,
+            previous_totals: previous.as_ref().map(|p| p.totals),
+            closed_since_previous_cycle: closed,
+            open_blocking: still_open,
+            termination_reason: Some("preflight-falhou".into()),
+        });
+        publish(&report);
+        for c in preflight.checks.iter().filter(|c| !c.ok) {
+            eprintln!("  ✗ {} — {}", c.name, c.detail);
+        }
+        eprintln!("the preflight failed: the cycle was aborted, and its report written");
+        std::process::exit(1);
+    }
+
+    // dispatch: each target is `agent-mux project qa`, a process of its own
+    struct Outcome {
+        report: Option<super::qa::LastReport>,
+        duration_sec: u64,
+    }
+    let logs = crate::tracing::analysis::default_snapshot_dir().join("project-qa-trail");
+    std::fs::create_dir_all(&logs)?;
+    let queue = std::sync::Mutex::new(targets.iter().collect::<std::collections::VecDeque<_>>());
+    let outcomes: std::sync::Mutex<BTreeMap<u64, Outcome>> = std::sync::Mutex::new(BTreeMap::new());
+    let timeout = std::time::Duration::from_secs(settings.feature_timeout_min * 60);
+    std::thread::scope(|scope| {
+        for _ in 0..parallel.min(targets.len()) {
+            scope.spawn(|| {
+                // the lock is let go before the target runs
+                let next = || queue.lock().ok().and_then(|mut q| q.pop_front());
+                while let Some(t) = next() {
+                    let before = comments_of(t.issue).run;
+                    println!("▶ {}", t.line());
+                    let started = std::time::Instant::now();
+                    let log = logs.join(format!("{}-c{cycle}-{}.log", fleet_name(&s.hub), t.issue));
+                    let mut timed_out = false;
+                    let spawned = std::fs::File::create(&log).and_then(|out| {
+                        let err = out.try_clone()?;
+                        let mut cmd = std::process::Command::new(&exe);
+                        cmd.args(["project", "qa", &t.issue.to_string(), "--dir"])
+                            .arg(&root)
+                            .args(["--harness", harness.as_str()])
+                            .stdin(std::process::Stdio::null())
+                            .stdout(out)
+                            .stderr(err);
+                        if let Some(only) = &t.only {
+                            cmd.args([
+                                "--only",
+                                &only
+                                    .iter()
+                                    .map(u32::to_string)
+                                    .collect::<Vec<_>>()
+                                    .join(","),
+                            ]);
+                        }
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::process::CommandExt;
+                            cmd.process_group(0);
+                        }
+                        cmd.spawn()
+                    });
+                    match spawned {
+                        Ok(mut child) => loop {
+                            match child.try_wait() {
+                                Ok(Some(_)) | Err(_) => break,
+                                Ok(None) if started.elapsed() > timeout => {
+                                    timed_out = true;
+                                    stop_run(&mut child);
+                                    break;
+                                }
+                                Ok(None) => {
+                                    std::thread::sleep(std::time::Duration::from_millis(500))
+                                }
+                            }
+                        },
+                        Err(x) => println!("  ! qa {} did not start: {x}", t.issue),
+                    }
+                    let after = comments_of(t.issue);
+                    let fresh = (after.run > before).then_some(after);
+                    let secs = started.elapsed().as_secs();
+                    println!(
+                        "◀ qa {}: {} ({secs}s; log {})",
+                        t.issue,
+                        match (&fresh, timed_out) {
+                            (Some(r), _) => r.verdict.map_or("report", |v| v.as_str()),
+                            (None, true) => "timeout",
+                            (None, false) => "no report",
+                        },
+                        log.display()
+                    );
+                    if let Ok(mut o) = outcomes.lock() {
+                        o.insert(
+                            t.issue,
+                            Outcome {
+                                report: fresh,
+                                duration_sec: secs,
+                            },
+                        );
+                    }
+                }
+            });
+        }
+    });
+    let outcomes = outcomes.into_inner().unwrap_or_default();
+
+    let mut entries: Vec<trail::FeatureEntry> = Vec::new();
+    for t in &in_cycle {
+        let mine: Vec<&trail::Target> = targets
+            .iter()
+            .filter(|x| feature_of(x) == Some(t.number))
+            .collect();
+        if mine.is_empty() {
+            // not tested again: what the last cycle said stands
+            if let Some(prev) = previous
+                .as_ref()
+                .and_then(|p| p.features.iter().find(|f| f.issue == t.number))
+            {
+                entries.push(trail::FeatureEntry {
+                    duration_sec: None,
+                    ..prev.clone()
+                });
+            }
+            continue;
+        }
+        let mut counts = trail::Counts::default();
+        let mut reasons: BTreeMap<String, u32> = BTreeMap::new();
+        let mut bugs: Vec<u64> = Vec::new();
+        let mut duration = 0u64;
+        let mut aborted = false;
+        let mut worst = trail::VERDE;
+        for target in mine {
+            let Some(o) = outcomes.get(&target.issue) else {
+                aborted = true;
+                continue;
+            };
+            duration += o.duration_sec;
+            let Some(r) = &o.report else {
+                aborted = true;
+                continue;
+            };
+            let (c, why) = trail::scenario_counts(r.results.values());
+            counts.pass += c.pass;
+            counts.fail += c.fail;
+            counts.blocked += c.blocked;
+            counts.total += c.total;
+            for (k, n) in why {
+                *reasons.entry(k).or_default() += n;
+            }
+            bugs.extend(r.bugs.iter().filter(|b| !b.existing).map(|b| b.number));
+            let verdict = r.verdict.unwrap_or_else(|| {
+                super::qa::aggregate(&r.results.values().cloned().collect::<Vec<_>>())
+            });
+            worst = trail::worst_of(worst, trail::feature_verdict(Some(verdict)));
+        }
+        if aborted {
+            let known = counts.pass + counts.fail + counts.blocked;
+            let plan = match planned(&t.title) {
+                0 => counts.total,
+                n => n,
+            };
+            let lost = plan.saturating_sub(known);
+            let mut entry = trail::aborted_entry(t.number, &t.title, lost, Some(duration));
+            entry.scenarios.pass = counts.pass;
+            entry.scenarios.fail = counts.fail;
+            entry.scenarios.blocked += counts.blocked;
+            entry.scenarios.total =
+                entry.scenarios.pass + entry.scenarios.fail + entry.scenarios.blocked;
+            if lost > 0 {
+                *reasons.entry("ambiente".into()).or_default() += lost;
+            }
+            entry.blocked_reasons = reasons;
+            entry.bugs_opened = bugs;
+            entries.push(entry);
+            continue;
+        }
+        entries.push(trail::FeatureEntry {
+            issue: t.number,
+            title: t.title.clone(),
+            verdict: worst.to_string(),
+            scenarios: counts,
+            bugs_opened: bugs,
+            duration_sec: Some(duration),
+            blocked_reasons: reasons,
+        });
+    }
+    entries.extend(outside);
+    let mut open_blocking = still_open;
+    open_blocking.extend(entries.iter().flat_map(|f| f.bugs_opened.clone()));
+    open_blocking.sort_unstable();
+    open_blocking.dedup();
+    let mut report = trail::build_report(trail::ReportInput {
+        milestone_number: milestone.number,
+        milestone_title: milestone.title.clone(),
+        cycle,
+        started_at: Some(started_at),
+        finished_at: Some(now_iso()),
+        preflight,
+        features: entries,
+        previous_totals: previous.as_ref().map(|p| p.totals),
+        closed_since_previous_cycle: closed,
+        open_blocking,
+        termination_reason: None,
+    });
+    let changed = trail::changed_since_previous(previous.as_ref(), &report, closed);
+    report.termination_reason =
+        trail::termination_of(true, &report.verdict, cycle, max_cycles, changed)
+            .map(str::to_string);
+    publish(&report);
+    println!(
+        "\nthe trail's verdict: {}{}",
+        report.verdict,
+        report
+            .termination_reason
+            .as_deref()
+            .map(|r| format!(" (ended: {r})"))
+            .unwrap_or_else(|| " (another cycle may follow)".into())
+    );
+    if report.verdict != trail::LIBERADA {
+        std::process::exit(1);
     }
     Ok(())
 }
