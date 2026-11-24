@@ -78,6 +78,18 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
   agent-mux project qa-trail report <milestone> [--cycle N] [--json]
         print a cycle's report, the last one by default
 
+  agent-mux project preflight --milestone <M> [--harness H] [--json]
+        before generating a milestone's specs: what could make every generation
+        fail (gh, the execution mode, the push, the harness) and where each
+        Feature's spec.md is: to generate, ready, waiting for its merge (never
+        generated again) or not read. Read-only; exits 1 on a block
+  agent-mux project audit --milestone <M> [--critique] [--critic H] [--json] [--dry-run]
+        the milestone's specs as a set, before the plans: a dependency cycle, a
+        blocking Feature due in a later milestone, a reference to an issue that
+        does not exist (these exit 1), and what is only worth a look. --critique
+        adds one read-only session that reads every spec against the others.
+        Nothing is written to GitHub
+
   agent-mux project insights [<n>] [--scope progress|tech|daily|brainstorm] [--topic \"…\"] [--harness H] [--dry-run]
         a read-only session reads where the Project stands (or one item and what is
         under it) and says what matters; the answer is shown and kept as a file.
@@ -419,6 +431,8 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
         Some("insights") => cmd_insights(&a).await,
         Some("qa") => cmd_qa(&a).await,
         Some("qa-trail") => cmd_qa_trail(&a).await,
+        Some("preflight") => cmd_preflight(&a),
+        Some("audit") => cmd_audit(&a).await,
         Some("estimate") => cmd_assist(&a, super::assist::Kind::Estimate).await,
         Some("refine") => cmd_assist(&a, super::assist::Kind::Refine).await,
         None | Some("help") | Some("--help") | Some("-h") => {
@@ -3225,6 +3239,503 @@ fn finish_report(r: &ops::Report, touched: &mut Vec<u64>) {
             touched.push(*n);
         }
     }
+}
+
+/// The milestone a command is about: `--milestone M`, or the words after
+/// the verb.
+fn milestone_arg(a: &Args, verb: &str) -> anyhow::Result<String> {
+    let reference = match a.value("--milestone") {
+        Some(m) => m.trim().to_string(),
+        None => a.positional.join(" ").trim().to_string(),
+    };
+    if reference.is_empty() {
+        anyhow::bail!(
+            "which milestone? give its number or its title: `agent-mux project {verb} --milestone <M>`"
+        );
+    }
+    Ok(reference)
+}
+
+/// The Features of a milestone, in number order.
+fn milestone_features<'a>(s: &'a Snapshot, title: &str) -> Vec<&'a Item> {
+    let mut out: Vec<&Item> = s
+        .items
+        .iter()
+        .filter(|i| i.item_type == Some(ItemType::Feature) && i.milestone.as_deref() == Some(title))
+        .collect();
+    out.sort_by_key(|i| i.number);
+    out
+}
+
+/// What would make every generation of a round fail alike: gh's login,
+/// who runs a step, the harness, the hub's checkout and the push a
+/// document is published with.
+fn preflight_environment(e: &Env, s: &Snapshot, harness: Harness) -> Vec<doctor::Check> {
+    use doctor::{Check, Status};
+    let hub = e.cfg.hub_repo().slug();
+    let cwd = e.cfg.root();
+    let probe = doctor::Probe {
+        auth: Some(super::github::auth_status(&e.tools, cwd)),
+        execution_var: Some(super::github::variable(
+            &e.tools,
+            cwd,
+            &hub,
+            "SPEC_WAVE_EXECUTION",
+        )),
+        workflows: Some(super::github::workflow_files(&e.tools, cwd, &hub)),
+        labels: None,
+    };
+    let mut out: Vec<Check> = doctor::checks(&e.cfg, &Ok(s.clone()), &probe)
+        .into_iter()
+        .filter(|c| c.name == "gh" || c.name == "execution mode")
+        .collect();
+    let check = |status, name: &str, detail: String| Check {
+        status,
+        name: name.to_string(),
+        detail,
+    };
+    out.push(if crate::session::command_available(harness.command()) {
+        check(
+            Status::Ok,
+            "harness",
+            format!("{} is installed", harness.as_str()),
+        )
+    } else {
+        check(
+            Status::Fail,
+            "harness",
+            format!(
+                "`{}` is not on PATH: no session could write a document",
+                harness.command()
+            ),
+        )
+    });
+    out.push(match steps::hub_root(&e.cfg) {
+        Ok(root) => check(Status::Ok, "hub checkout", root.display().to_string()),
+        Err(why) => check(Status::Fail, "hub checkout", why),
+    });
+    out.push(match super::github::can_push(&e.tools, cwd, &hub) {
+        Ok(Some(true)) => check(
+            Status::Ok,
+            "publishing",
+            format!("gh's login may push to {hub}: a document is published by pull request"),
+        ),
+        Ok(Some(false)) => check(
+            Status::Fail,
+            "publishing",
+            format!(
+                "gh's login may not push to {hub}: a document would be generated and never published"
+            ),
+        ),
+        Ok(None) => check(
+            Status::Skip,
+            "publishing",
+            format!("GitHub did not say whether gh's login may push to {hub}"),
+        ),
+        Err(why) => check(
+            Status::Skip,
+            "publishing",
+            why.lines().next().unwrap_or("").to_string(),
+        ),
+    });
+    out
+}
+
+/// `project preflight --milestone M [--harness H] [--json]`: the port of
+/// spec-wave's `preflight`. Reads only.
+fn cmd_preflight(a: &Args) -> anyhow::Result<()> {
+    use super::{audit, trail};
+    let reference = milestone_arg(a, "preflight")?;
+    let harness =
+        harness_of(a.value("--harness"), Harness::Claude).map_err(|x| anyhow::anyhow!(x))?;
+    let mut e = env(a)?;
+    if !a.flag("--cached") {
+        // a round is decided on what GitHub says now
+        e.fresh = Fresh::Refresh;
+    }
+    let s = snap(&e)?;
+    let milestone = trail::resolve_milestone(&s.milestones, &reference)
+        .map_err(|x| anyhow::anyhow!(x))?
+        .clone();
+    let inventory = audit::inspect_milestone(&milestone_features(&s, &milestone.title));
+    let environment = preflight_environment(&e, &s, harness);
+    let verdict = audit::preflight_verdict(&environment, &inventory);
+    let blocked = verdict.status == "bloqueio";
+
+    if a.flag("--json") {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "milestone": {
+                    "title": milestone.title,
+                    "number": milestone.number,
+                    "base": s.default_branch,
+                },
+                "ambiente": environment,
+                "inventario": inventory,
+                "veredito": verdict,
+            }))?
+        );
+        if blocked {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    println!("Preflight of {} (base: {})", s.hub, s.default_branch);
+    for c in &environment {
+        println!("  {} {:<16} {}", c.status.mark(), c.name, c.detail);
+    }
+    println!(
+        "\nMilestone \"{}\": {} Feature(s), {} to generate",
+        milestone.title,
+        inventory.features.len(),
+        inventory.gerar.len()
+    );
+    for f in &inventory.features {
+        println!(
+            "  {:<22} #{} {}{}",
+            audit::spec_mark(f),
+            f.number,
+            f.title.chars().take(60).collect::<String>(),
+            f.pr.as_ref()
+                .map(|p| format!("  PR #{}", p.number))
+                .unwrap_or_default()
+        );
+    }
+    if !inventory.gatilhos_pendentes.is_empty() {
+        println!("\n  Trigger labels left behind (remove them before generating):");
+        for g in &inventory.gatilhos_pendentes {
+            println!("    #{}: {}", g.number, g.labels.join(", "));
+        }
+    }
+    if !verdict.avisos.is_empty() || !verdict.bloqueios.is_empty() {
+        println!();
+    }
+    // an environment line is in the checklist above already
+    let shown: Vec<String> = environment
+        .iter()
+        .map(|c| format!("{}: {}", c.name, c.detail))
+        .collect();
+    for w in verdict.avisos.iter().filter(|w| !shown.contains(w)) {
+        println!("  ! {w}");
+    }
+    for b in verdict.bloqueios.iter().filter(|b| !shown.contains(b)) {
+        println!("  ✗ {b}");
+    }
+    if blocked {
+        println!(
+            "\n{} block(s). Fix them before generating.",
+            verdict.bloqueios.len()
+        );
+        std::process::exit(1);
+    }
+    if inventory.gerar.is_empty() {
+        println!("\nPreflight ok. Nothing to generate.");
+    } else {
+        println!(
+            "\nPreflight ok. {} spec(s) to generate: `agent-mux project run <n>` on {}.",
+            inventory.gerar.len(),
+            inventory
+                .gerar
+                .iter()
+                .map(|f| format!("#{}", f.number))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// A Feature's spec as it is now, wherever it is: on the default branch
+/// or on its artifact branch. A read that fails is `Unknown`, never
+/// "there is none".
+fn read_spec(hub_root: &Path, item: &Item) -> (Option<String>, DocState) {
+    let Some(doc) = item.docs.get("spec") else {
+        return (None, DocState::Missing);
+    };
+    let read = match doc.state {
+        DocState::Base => super::deliver::read_base_file(hub_root, &doc.path),
+        DocState::Pr | DocState::Branch => {
+            let branch = doc
+                .branch
+                .clone()
+                .unwrap_or_else(|| super::contract::artifact_branch(item.number, "spec"));
+            super::deliver::read_branch_file(hub_root, &branch, &doc.path)
+        }
+        other => return (None, other),
+    };
+    match read {
+        Ok(Some(content)) if !content.trim().is_empty() => (Some(content), doc.state),
+        _ => (None, DocState::Unknown),
+    }
+}
+
+/// `project audit --milestone M [--critique] [--critic H] [--json]
+/// [--dry-run]`: the port of spec-wave's `audit`. Writes nothing.
+async fn cmd_audit(a: &Args) -> anyhow::Result<()> {
+    use super::{audit, trail};
+    let reference = milestone_arg(a, "audit")?;
+    let as_json = a.flag("--json");
+    let critic = harness_of(
+        a.value("--critic").or(a.value("--harness")),
+        Harness::Claude,
+    )
+    .map_err(|x| anyhow::anyhow!(x))?;
+    let mut e = env(a)?;
+    if !a.flag("--cached") {
+        e.fresh = Fresh::Refresh;
+    }
+    let s = snap(&e)?;
+    let milestone = trail::resolve_milestone(&s.milestones, &reference)
+        .map_err(|x| anyhow::anyhow!(x))?
+        .clone();
+    let hub_root = steps::hub_root(&e.cfg).map_err(|x| anyhow::anyhow!(x))?;
+    let milestone_ref = |title: &str| {
+        s.milestones
+            .iter()
+            .find(|m| m.title == title)
+            .map(|m| audit::MilestoneRef {
+                number: m.number,
+                title: m.title.clone(),
+                due_on: m.due.clone(),
+            })
+    };
+    let entry = |i: &Item| audit::CatalogEntry {
+        number: i.number,
+        title: i.title.clone(),
+        closed: !i.open,
+        milestone: i.milestone.as_deref().and_then(milestone_ref),
+    };
+
+    // what a spec may name: the Features of every milestone
+    let mut catalog: Vec<audit::CatalogEntry> = s
+        .items
+        .iter()
+        .filter(|i| i.item_type == Some(ItemType::Feature))
+        .map(entry)
+        .collect();
+    let this = audit::MilestoneRef {
+        number: milestone.number,
+        title: milestone.title.clone(),
+        due_on: milestone.due.clone(),
+    };
+    let features: Vec<audit::Target> = milestone_features(&s, &milestone.title)
+        .into_iter()
+        .filter(|i| i.open)
+        .map(|i| {
+            let (spec, spec_state) = read_spec(&hub_root, i);
+            audit::Target {
+                number: i.number,
+                title: i.title.clone(),
+                milestone: this.clone(),
+                spec,
+                spec_state,
+            }
+        })
+        .collect();
+    if features.is_empty() {
+        anyhow::bail!("no open Feature in milestone \"{}\"", milestone.title);
+    }
+
+    // `#N` the catalog does not know: an issue in no milestone, a Story of
+    // another Feature, or a number that does not exist. GitHub says which
+    let mut unknown: Vec<u64> = Vec::new();
+    for f in &features {
+        let section = f.spec.as_deref().and_then(audit::dependency_section);
+        for n in audit::issue_refs(section.as_deref().unwrap_or("")) {
+            if !catalog.iter().any(|c| c.number == n) && !unknown.contains(&n) {
+                unknown.push(n);
+            }
+        }
+    }
+    let mut missing: Vec<u64> = Vec::new();
+    if !unknown.is_empty() {
+        // a read that fails stops here: it must not turn into "does not exist"
+        let found = ops::read_items(&e.tools, &e.cfg, &unknown)
+            .map_err(|x| anyhow::anyhow!("the issues the specs name could not be read: {x}"))?;
+        for n in &unknown {
+            match found.iter().find(|i| i.number == *n) {
+                Some(i) => catalog.push(entry(i)),
+                None => missing.push(*n),
+            }
+        }
+    }
+
+    // the code: the hub's own, and each code repository beside it
+    let mut repos = vec![audit::RepoFiles {
+        prefix: String::new(),
+        files: audit::list_repo_files(&hub_root),
+    }];
+    for r in &e.cfg.repositories {
+        if let Some(dir) = hub_root
+            .parent()
+            .map(|p| p.join(&r.repo.repo))
+            .filter(|d| d.is_dir() && *d != hub_root)
+        {
+            repos.push(audit::RepoFiles {
+                prefix: r.repo.repo.clone(),
+                files: audit::list_repo_files(&dir),
+            });
+        }
+    }
+
+    let result = audit::audit_milestone(&features, &catalog, &missing, &repos);
+    let mut verdict = audit::audit_verdict(&result);
+    if !as_json {
+        println!(
+            "Milestone \"{}\" of {}: {} Feature(s) audited",
+            milestone.title,
+            s.hub,
+            features.len()
+        );
+    }
+
+    // the set critique: one session over every spec, after what a grep can do
+    let mut critique: Option<Value> = None;
+    if a.flag("--critique") {
+        let with_spec: Vec<(u64, &str, &str)> = features
+            .iter()
+            .filter_map(|f| Some((f.number, f.title.as_str(), f.spec.as_deref()?)))
+            .collect();
+        if with_spec.len() < 2 {
+            verdict.avisos.push(format!(
+                "The set critique did not run: {} spec(s) available, and a set of one has no pair.",
+                with_spec.len()
+            ));
+            if verdict.status == "ok" {
+                verdict.status = "aviso";
+            }
+        } else if a.flag("--dry-run") {
+            if !as_json {
+                println!(
+                    "  would run the set critique over {} specs with the flow {} on {} (a read-only session)",
+                    with_spec.len(),
+                    steps::FLOW_CRITIQUE,
+                    critic.as_str()
+                );
+            }
+        } else {
+            if !as_json {
+                println!(
+                    "  set critique over {} specs with the flow {} on {} (a read-only session)…",
+                    with_spec.len(),
+                    steps::FLOW_CRITIQUE,
+                    critic.as_str()
+                );
+            }
+            let model = step_model(&e.cfg, critic, "critique", &[], 1);
+            let said = model.clone().unwrap_or_else(|| critic.as_str().to_string());
+            let answer = run_flow(
+                steps::FLOW_CRITIQUE,
+                &hub_root,
+                critic,
+                json!({
+                    "kind": "conjunto",
+                    "document": audit::set_document(&with_spec),
+                    "issue": format!(
+                        "Milestone \"{}\" de {}: {} specs, uma por Feature.",
+                        milestone.title,
+                        s.hub,
+                        with_spec.len()
+                    ),
+                }),
+                model,
+                super::ProjectLaunch {
+                    hub: s.hub.clone(),
+                    // the audit of a milestone belongs to no item
+                    item: 0,
+                    milestone: Some(milestone.title.clone()),
+                    step: "audit".to_string(),
+                    attempt: 1,
+                    role: "critique".to_string(),
+                    executor: "operator".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await
+            // who asked for the critique must not get an "ok" that covered
+            // only the cheap half
+            .map_err(|x| anyhow::anyhow!("the set critique failed: {x}"))?;
+            let known: Vec<u64> = with_spec.iter().map(|(n, _, _)| *n).collect();
+            let findings = audit::set_findings(&answer, &known)
+                .map_err(|x| anyhow::anyhow!("the set critique's answer was refused: {x}"))?;
+            audit::add_set_findings(&mut verdict, &findings);
+            critique = Some(json!({
+                "model": said,
+                "findings": findings,
+                // the comment for the issues of both ends of each finding:
+                // whoever drives the command posts it, never agent-mux
+                "markdown": audit::render_set_markdown(&findings, &said),
+            }));
+        }
+    }
+    let problem = verdict.status == "problema";
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "milestone": {"title": milestone.title, "number": milestone.number},
+                "features": features
+                    .iter()
+                    .map(|f| json!({
+                        "number": f.number,
+                        "title": f.title,
+                        "temSpec": f.spec.is_some(),
+                    }))
+                    .collect::<Vec<_>>(),
+                "auditoria": result,
+                "critica": critique,
+                "veredito": verdict,
+            }))?
+        );
+        if problem {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if !result.grafo.is_empty() {
+        println!("\nDependencies among Features (read from the specs):");
+        for g in &result.grafo {
+            println!("  {}", audit::edge_line(g));
+        }
+    }
+    if !verdict.avisos.is_empty() || !verdict.materiais.is_empty() {
+        println!();
+    }
+    for w in &verdict.avisos {
+        println!("  ! {w}");
+    }
+    for m in &verdict.materiais {
+        println!("  ✗ {m}");
+    }
+    if let Some(md) = critique
+        .as_ref()
+        .and_then(|c| c.get("markdown"))
+        .and_then(Value::as_str)
+    {
+        println!(
+            "\nThe set critique, as a comment for the issues it names (nothing was posted):\n\n{md}"
+        );
+    }
+    if problem {
+        println!(
+            "\n{} material finding(s). Decide before generating the plans.",
+            verdict.materiais.len()
+        );
+        std::process::exit(1);
+    }
+    println!(
+        "\n{}",
+        if verdict.status == "aviso" {
+            "Nothing material: look at the warnings before going on."
+        } else {
+            "The milestone's dependencies close. Go on to the plans."
+        }
+    );
+    Ok(())
 }
 
 fn cmd_doctor(a: &Args) -> anyhow::Result<()> {

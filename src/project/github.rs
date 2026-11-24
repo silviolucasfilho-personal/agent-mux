@@ -818,6 +818,21 @@ pub fn auth_status(tools: &Tools, cwd: &Path) -> Result<String, String> {
     gh(tools, cwd, &["auth", "status"], "gh auth status")
 }
 
+/// Whether gh's login may push to a repository (`gh api repos/<o>/<r>`,
+/// its `permissions.push`; probed on 2026-11-23). `None` when GitHub
+/// does not say.
+pub fn can_push(tools: &Tools, cwd: &Path, repo: &str) -> Result<Option<bool>, String> {
+    let out = gh(
+        tools,
+        cwd,
+        &["api", &format!("repos/{repo}")],
+        "gh api (repository)",
+    )?;
+    Ok(json(&out, "gh api (repository)")?
+        .pointer("/permissions/push")
+        .and_then(Value::as_bool))
+}
+
 /// A repository variable, or `None` when it is not set.
 pub fn variable(
     tools: &Tools,

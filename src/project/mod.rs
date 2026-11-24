@@ -17,6 +17,7 @@
 
 pub mod apply;
 pub mod assist;
+pub mod audit;
 pub mod build;
 pub mod cli;
 pub mod config;

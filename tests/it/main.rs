@@ -22,6 +22,7 @@ mod loop_skills;
 mod loop_ui;
 mod mcp_protocol;
 mod persistent_sessions;
+mod project_audit;
 mod project_fleet;
 mod project_steps;
 mod project_trail;

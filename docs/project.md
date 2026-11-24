@@ -297,6 +297,41 @@ When the targets end, the cycle's report is written: `docs/qa/<milestone>/cycle-
 
 Not done: spec-wave runs each Feature in a container (`qa.lead.container`); here each runs in a worktree on this machine, so two Features that need the same port or database will collide: use `--parallel 1` then. The Milestones screen does not show the trail yet.
 
+### Before a milestone's documents
+
+```
+agent-mux project preflight --milestone <M>              what there is to generate, and what would fail
+agent-mux project audit --milestone <M>                  the specs as a set
+agent-mux project audit --milestone <M> --critique       the same, plus one session that reads them against each other
+```
+
+Both read only: nothing is written to GitHub and no file changes. The milestone is named by its number or its title, with `--milestone` or as the words after the verb. `--json` prints the result with spec-wave's keys.
+
+**`preflight`** comes before a round of specs, because each generation pays a model and a wrong credential found at the seventh Feature costs seven of them. It shows:
+
+- **The environment**: gh's login, who runs a step (the file's execution mode against the repository's variable), the harness (`--harness H`), the hub's checkout, and whether gh's login may push to the hub, since every generated document ends as a push and a pull request. A failure blocks; a warning does not; a check that could not be made says so and blocks nothing.
+- **The milestone's Features**, each with where its `spec.md` is: on the default branch, in an open pull request, on a branch with no pull request, missing (to generate), or not read.
+
+A spec that is generated and waits for its merge is **never one to generate**: a second generation pays for the same document and throws the review away. A Feature whose read failed is not one either, until you confirm. A trigger label left on an issue is named, since `project run` refuses there. The command exits 1 only on a block.
+
+**`audit`** comes between "the specs are merged" and "generate the plans". The critique of a document reads one Feature; the audit reads the open Features' specs together, each wherever it is (default branch or artifact branch), and takes each one's **Dependências** section:
+
+| Finding | Counts as |
+|---|---|
+| A cycle of dependencies among the milestone's Features | material |
+| A Feature that depends on one due in a **later** milestone | material |
+| A `#N` that is not an issue | material |
+| A Feature with no spec, a spec with no Dependências section, a spec that could not be read | warning |
+| A dependency on an issue in no milestone | warning |
+| A section in prose that names no Feature, and internal dependencies that name none ("who creates this?") | warning |
+| A code path that carries two words of the Feature's name ("does this exist already?") | warning |
+
+A dependency is read three ways: `#N`, the Feature's slug, and its title. One on a closed Feature is met. The first warning line says how much of the graph was read (`Graph: 3/5 Feature(s) with readable edges`), so an `ok` is never mistaken for "nothing could be read". A material finding exits 1.
+
+`--critique` adds one read-only session (the `project-critique` flow with `kind = conjunto`, on `--critic H`) that reads every spec against the others, for what no grep finds: the same rule told two ways, a dependency whose two ends disagree, two specs describing the same thing. It needs at least two specs. A grave finding is material. The findings are printed as a comment ready for the issues of both ends; agent-mux posts nothing. A critique that fails fails the command, so an `ok` never covers only the cheap half. `--dry-run` says what the critique would read and starts no session.
+
+Not done: the `decisoes_de_modelagem` check of `tech_context.yml` (a resource declared with no owner), and both commands on the Milestones screen.
+
 ### The fleet
 
 Instead of running one item yourself and waiting, you can dispatch several and let agent-mux run them a few at a time.
@@ -457,6 +492,8 @@ agent-mux project qa <n> [--only a,b] [--severity P] [--harness H] [--dry-run]
 agent-mux project qa-trail plan <milestone> [--harness H] [--critic H] [--dry-run]
 agent-mux project qa-trail run <milestone> [--only f1,f2] [--max-cycles N] [--parallel N] [--harness H] [--dry-run]
 agent-mux project qa-trail report <milestone> [--cycle N] [--json]
+agent-mux project preflight --milestone <M> [--harness H] [--json]
+agent-mux project audit --milestone <M> [--critique] [--critic H] [--json] [--dry-run]
 agent-mux project insights [<n>] [--scope progress|tech|daily|brainstorm] [--topic "…"] [--harness H] [--dry-run]
 agent-mux project estimate <n> [--yes] [--discard] [--harness H] [--dry-run] [--json]
 agent-mux project refine <n> [--yes] [--discard] [--harness H] [--dry-run] [--json]
@@ -493,7 +530,8 @@ A read that fails never becomes a fact. A document whose listing failed is `unkn
 ## 9. Not built yet
 
 - Closing the hub issue of a cross-repository Story when it reaches Done, and a Bug or a Task across several repositories.
-- The milestone's preflight and audit, a container per Feature in the QA of a milestone, and the trail on the Milestones screen.
+- A container per Feature in the QA of a milestone, and the trail, the preflight and the audit on the Milestones screen.
+- In the milestone's audit: the `decisoes_de_modelagem` check of `tech_context.yml`.
 - Starting the QA plan from the `spec-wave:qa` label, and the comments spec-wave leaves when the step is refused: the command prints the reason instead.
 - In the fleet: dispatching to a named developer from the screens (the command does it), the extra tracks of spec-wave's queue label (`devAgent.queues`), and rounds inside a run.
 - On the Observability screen: cost by model, critique attempts per document, and the time from Ready to Review.

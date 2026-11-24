@@ -1757,3 +1757,66 @@ The QA of a milestone: `agent-mux project qa-trail plan|run|report
 - **Not built:** the trail on the Milestones screen, `naoExecutado`
   (always 0, as in spec-wave's command), and evidence files.
 - **Left of phase 5:** `preflight` and `audit --milestone`.
+
+## 35. Phase 5, fourth part, as built
+
+A milestone before its documents: `agent-mux project preflight
+--milestone <M>` and `agent-mux project audit --milestone <M>
+[--critique]`, the ports of spec-wave's `preflight` and `audit`
+(`commands/preflight.mjs`, `commands/audit.mjs`, `lib/spec-audit.mjs`).
+Both read only.
+
+- **The rules** are `project::audit`, pure and ported one by one:
+  `inspect_milestone`, `preflight_verdict`; `dependency_section`,
+  `dependency_section_is_empty`, `issue_refs`, `mentioned_issues`,
+  `untraceable_bullets`, `milestone_after`, `slug_keywords`,
+  `code_overlap`, `audit_milestone`, `audit_verdict`. The results are
+  serialized with spec-wave's keys (`gerar`, `aguardandoMerge`,
+  `grafo`, `inversoes`, …), frozen by tests; the lines a person reads are
+  in English, like the rest of the command line. The port was run beside
+  spec-wave's own functions on a real hub's specs and gave the same
+  bullets and edges.
+- **The inventory** is taken from the snapshot, not from a checkout: a
+  spec's state is the snapshot's `DocState`, named as spec-wave names it
+  (`remote`, `pending-pr`, `branch-only`, `missing`, `unknown`; never
+  `local`). A closed Feature is in the snapshot only for
+  `github::CLOSED_DAYS` days, so the list of closed ones is short.
+- **The preflight's environment** is not spec-wave's. Its two inspectors
+  judge GitHub Actions (`describeModeState`, `inspectPrPublishing`:
+  secrets, workflow permissions, branch protection); here a document is
+  generated and published from this machine. The checks are the
+  doctor's `gh` and `execution mode` lines, the harness on `PATH`, the
+  hub's checkout, and `github::can_push` (`gh api repos/<o>/<r>`,
+  `permissions.push`, probed on 2026-11-23). They are the `ambiente`
+  list of the JSON, in place of spec-wave's `modo` and `publicacao`. A
+  check that could not be made blocks nothing.
+- **The audit's catalog** is the snapshot's Features of every milestone.
+  A `#N` it does not know is read from GitHub (`ops::read_items`, one
+  query): found, it joins the catalog with its milestone; not found, it
+  is an issue that does not exist. A read that fails stops the command,
+  where spec-wave reads a failure as "does not exist".
+- **A spec is read where it is** (`cli::read_spec`): the default branch,
+  or its artifact branch when it waits for its merge
+  (`deliver::read_branch_file`). A read that fails is `specIndisponivel`,
+  never `semSpec`.
+- **The code heuristic** reads the hub's files and those of each code
+  repository checked out beside it (`audit::list_repo_files`, bounded as
+  spec-wave's; a hit names its repository).
+- **`--critique`** is the `project-critique` flow with `kind =
+  "conjunto"` (a new section of `wf-project-critique`, ported from
+  `plugin/skills/audit/model-prompt.critique.md`), one session over
+  `audit::set_document`. The Features a finding crosses travel in its
+  `anchor` as `#N` references instead of spec-wave's `features` array,
+  so the flow's schema did not change; `audit::set_findings` refuses a
+  finding that names none or one outside the set. The comment is
+  spec-wave's "Crítica avulsa" format, with no marker, so it counts no
+  attempt; it is printed and never posted. The session is tagged
+  `metadata.project` with `step = "audit"`, the milestone and item 0.
+- **Not ported:** `unownedDecisions` (`semDono`: the
+  `decisoes_de_modelagem` section of `tech_context.yml` needs a YAML
+  parser agent-mux does not carry), and the downgrade of a grave finding
+  whose quote is not in the documents (as in §20).
+- **Not built:** the Preflight and Audit tabs of the Milestones screen
+  and their keys (`P`, `A`, `g`).
+- **Phase 5 is built** as §32 to §35 describe, less what each names.
+  Phase 6 (`project init`, the web pages) is not started.
