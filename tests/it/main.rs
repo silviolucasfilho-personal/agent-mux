@@ -24,6 +24,7 @@ mod mcp_protocol;
 mod persistent_sessions;
 mod project_fleet;
 mod project_steps;
+mod project_trail;
 mod project_ui;
 mod pty_session;
 mod scroll_ux;

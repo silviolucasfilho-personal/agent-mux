@@ -43,6 +43,7 @@ pub mod snapshot;
 pub mod stack;
 pub mod stage;
 pub mod store;
+pub mod trail;
 pub mod workspace;
 pub mod write;
 

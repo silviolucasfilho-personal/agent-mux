@@ -687,6 +687,63 @@ pub struct Detail {
     pub comments: Vec<Comment>,
 }
 
+/// A milestone's description, read now. Probed: `gh api
+/// repos/<owner>/<repo>/milestones/<n>` answers GitHub's REST object
+/// (2026-11-23).
+pub fn milestone_description(
+    tools: &Tools,
+    cfg: &ProjectConfig,
+    number: u64,
+) -> Result<String, String> {
+    let what = "gh api (milestone)";
+    let out = gh(
+        tools,
+        cfg.root(),
+        &[
+            "api",
+            &format!("repos/{}/milestones/{number}", cfg.hub_repo().slug()),
+        ],
+        what,
+    )?;
+    Ok(json(&out, what)?
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string())
+}
+
+/// Whether an issue is open, and its body, read now.
+pub fn issue_state(
+    tools: &Tools,
+    cfg: &ProjectConfig,
+    number: u64,
+) -> Result<(bool, String), String> {
+    let what = "gh issue view";
+    let out = gh(
+        tools,
+        cfg.root(),
+        &[
+            "issue",
+            "view",
+            &number.to_string(),
+            "-R",
+            &cfg.hub_repo().slug(),
+            "--json",
+            "state,body",
+        ],
+        what,
+    )?;
+    let v = json(&out, what)?;
+    let state = v.get("state").and_then(Value::as_str).unwrap_or("");
+    Ok((
+        !state.eq_ignore_ascii_case("CLOSED"),
+        v.get("body")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    ))
+}
+
 /// Why a closed issue was closed, as GitHub says it (`COMPLETED`,
 /// `NOT_PLANNED`, `DUPLICATE`; empty when it says nothing). Probed:
 /// `gh issue view --json stateReason` (gh's JSON FIELDS, 2026-11-23).

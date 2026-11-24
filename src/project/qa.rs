@@ -546,6 +546,42 @@ pub fn validate_results(payload: &Value, expected: &[u32]) -> Result<Vec<Scenari
 pub struct LastReport {
     pub run: u32,
     pub results: BTreeMap<u32, ScenarioResult>,
+    /// The verdict the report's marker states.
+    pub verdict: Option<Verdict>,
+    /// The Bugs its "Bugs abertos" line names.
+    pub bugs: Vec<BugRef>,
+}
+
+/// The Bugs of a report's `**Bugs abertos:**` line, as `render_report`
+/// writes it: `#12 (cenário 2)`, `#13 (cenário 3, já existia)`.
+fn report_bugs(body: &str) -> Vec<BugRef> {
+    let Some(line) = body
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("**Bugs abertos:**"))
+    else {
+        return Vec::new();
+    };
+    line.split('#')
+        .skip(1)
+        .filter_map(|part| {
+            let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+            let number = digits.parse().ok()?;
+            let inside = &part[part.find('(')? + 1..part.find(')')?];
+            let cenario = inside
+                .trim_start_matches("cenário")
+                .trim()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .ok()?;
+            Some(BugRef {
+                number,
+                cenario,
+                existing: inside.contains("já existia"),
+            })
+        })
+        .collect()
 }
 
 pub fn parse_last_report(comments: &[github::Comment]) -> LastReport {
@@ -582,6 +618,11 @@ pub fn parse_last_report(comments: &[github::Comment]) -> LastReport {
         let Some(list) = payload.get("scenarios").and_then(Value::as_array) else {
             continue;
         };
+        out.verdict = head
+            .split_whitespace()
+            .find_map(|w| w.strip_prefix("verdict="))
+            .and_then(Verdict::parse);
+        out.bugs = report_bugs(&c.body);
         out.results = list
             .iter()
             .filter_map(|s| {
@@ -1732,6 +1773,23 @@ mod tests {
         assert_eq!(last.results.len(), 3);
         assert_eq!(last.results[&2].verdict, Verdict::Fail);
         assert!(last.results[&1].carried);
+        // the verdict and the Bugs, for a milestone's cycle
+        assert_eq!(last.verdict, Some(Verdict::Fail));
+        assert_eq!(
+            last.bugs,
+            vec![BugRef {
+                number: 90,
+                cenario: 2,
+                existing: false
+            }]
+        );
+        assert_eq!(
+            report_bugs("**Bugs abertos:** #7 (cenário 1, já existia), #8 (cenário 3)")
+                .iter()
+                .map(|b| (b.number, b.cenario, b.existing))
+                .collect::<Vec<_>>(),
+            vec![(7, 1, true), (8, 3, false)]
+        );
 
         // --only 2 on the next run: 1 and 3 are carried, 4 never ran
         let (combined, pending) =

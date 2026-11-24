@@ -1701,5 +1701,59 @@ The `qa-plan` step: the port of spec-wave's `generate-qa-plan`
   comment on the issue; the audit is not given the decomposition or the
   tech context; and a Tech Leader's decisions on findings
   (`risk-accepted`) are not applied, as for every other document.
-- **Left of phase 5:** the QA of a milestone
+- **Left of phase 5 (at the time):** the QA of a milestone
   (`qa-trail plan|run|report`), and `preflight` / `audit --milestone`.
+
+## 34. Phase 5, third part, as built
+
+The QA of a milestone: `agent-mux project qa-trail plan|run|report
+<milestone>`, the port of spec-wave's `qa-lead` (`commands/qa-lead.mjs`,
+`lib/qa-lead.mjs`).
+
+- **The rules** are `project::trail`, pure and ported one by one:
+  `resolve_milestone`, `classify_for_plan`, `classify_scope`, `run_gate`,
+  `feature_order` (over `order::order_nodes`), `feature_verdict`,
+  `scenario_counts`, `aborted_entry`, `build_report`,
+  `changed_since_previous`, `termination_of`, `next_cycle_gate`,
+  `retest_plan`, `milestone_block`, `upsert_block`, `render_md`. The
+  report is `trail::Report`, serialized with spec-wave's keys
+  (`qa-trail-report.v1`), frozen by a test.
+- **`plan`** does not apply the `spec-wave:qa` trigger: for each Feature
+  classified `Generate` it runs `agent-mux project run <n> --step
+  qa-plan` as a child process, one at a time, then reads the Project
+  again and reports each Feature's state. There is no `--watch`: the
+  step is synchronous. A Feature with `spec-wave:qa` on it is reported
+  as being written elsewhere and left alone.
+- **`run`** is one cycle (`cli::cmd_qa_trail`). Each target is
+  `agent-mux project qa <issue> [--only …]` as a process in a group of
+  its own (`AGENT_MUX_PROJECT_EXE` names a stand-in in tests), up to
+  `qa.lead.maxParallel` at once on threads, stopped as a group after
+  `qa.lead.featureTimeoutMin`. What a target did is read as spec-wave
+  reads it: the issue's last 🧪 report, counted only when its `run`
+  number rose (`qa::LastReport` now also gives the report's verdict and
+  the Bugs of its "Bugs abertos" line).
+- **No container.** spec-wave's backend (`docker` or `sandbox`,
+  `qa.lead.container`) is not ported: a target runs in the temporary
+  worktree `project qa` makes. The preflight checks what can abort every
+  target alike here: the harness on `PATH` and a gigabyte of free disk.
+- **The report is published by pull request**, not pushed to the default
+  branch as spec-wave does: `deliver::publish` on
+  `spec-wave/<milestone>-qa-trail-c<n>` with `report.md` and
+  `report.json` under `docs/qa/<slug>/cycle-<n>/`. Since the next cycle
+  must find the last one before that merge, a copy is kept under the
+  scratch folder (`trail::keep`, `kept`), and `trail::cycles` reads both
+  it and the default branch (`merged`), the kept one winning. The
+  pull request's title says "issue <n>" for the milestone's number,
+  which `deliver::pr_title` writes for every artifact.
+- **The milestone's description** gets spec-wave's delimited block
+  (`github::milestone_description`, `write::set_milestone_description`:
+  `gh api repos/<hub>/milestones/<n>`, `-X PATCH -f description=…`),
+  best effort.
+- **One rule is not spec-wave's:** `next_cycle_gate` lets a cycle start
+  when the last one had an aborted execution, even with no scenario
+  counted as blocked. spec-wave counts the planned scenarios from the
+  plan in the checkout; when that count is zero its gate would refuse
+  every later cycle.
+- **Not built:** the trail on the Milestones screen, `naoExecutado`
+  (always 0, as in spec-wave's command), and evidence files.
+- **Left of phase 5:** `preflight` and `audit --milestone`.

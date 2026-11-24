@@ -272,6 +272,31 @@ Then the verdict decides:
 
 Not done: screenshots and video as evidence, and a Story across several repositories is tested in the first one.
 
+### QA of a milestone
+
+```
+agent-mux project qa-trail plan <milestone> [--dry-run]    write the QA plans that are missing
+agent-mux project qa-trail run <milestone> --dry-run       the targets of the next cycle
+agent-mux project qa-trail run <milestone>                 one cycle
+agent-mux project qa-trail report <milestone> [--cycle N]  a cycle's report
+```
+
+A trail is the Features of one milestone, named by its number (`3`, `#3`) or its title, in the order their Stories' dependencies give.
+
+**`plan`** says where each Feature's QA plan stands, and runs the `qa-plan` step, one Feature after the other, on those that have a merged spec and plan and nothing holding them. It leaves alone a Feature that is ready, one a person must act on (`critique-failed`, `needs-human`), and one with `spec-wave:qa` on it (spec-wave's own Action is writing its plan). It exits 1 until every Feature is ready.
+
+**`run`** is one cycle. It starts only when every Feature of the milestone that is in QA has `spec-wave:qa-ready`; Features before QA or past it are listed and not tested. Each target is `agent-mux project qa`, a process of its own in its own worktree, up to `qa.lead.maxParallel` at once (4; `--parallel N`), stopped after `qa.lead.featureTimeoutMin` minutes (45). Their output goes to log files the command names.
+
+- **The first cycle** tests every Feature in QA.
+- **A later cycle** tests only what may have changed: the scenario of each Bug closed since the last cycle, on its Story (`qa <story> --only <n>`); the blocked scenarios of a Feature that was inconclusive; and the whole of a Feature whose run left no report. A green Feature is not tested again.
+- **A cycle refuses to start** when the trail was already released, when `qa.lead.maxCycles` cycles ran (3; `--max-cycles N`), or when no Bug was closed and nothing was blocked, since it would give the same result.
+
+When the targets end, the cycle's report is written: `docs/qa/<milestone>/cycle-<n>/report.md` and `report.json` (spec-wave's format, so either tool reads the other's cycles) on a pull request, and three lines between markers in the milestone's description, after whatever a person wrote there. The trail is **released** (`liberada`) only when every Feature it tested is green; the command exits 1 otherwise. The verdicts, Bugs and board moves are those of each `project qa`: the trail itself moves nothing.
+
+`--only 12,15` limits a cycle to some Features. A copy of each cycle is kept on this machine, so the next cycle finds it before its pull request is merged.
+
+Not done: spec-wave runs each Feature in a container (`qa.lead.container`); here each runs in a worktree on this machine, so two Features that need the same port or database will collide: use `--parallel 1` then. The Milestones screen does not show the trail yet.
+
 ### The fleet
 
 Instead of running one item yourself and waiting, you can dispatch several and let agent-mux run them a few at a time.
@@ -429,6 +454,9 @@ agent-mux project cancel <n>
 agent-mux project fleet status [--json]
 agent-mux project fleet run [--once] [--dispatch <n>] [--max-runs N] [--max-failures N] [--poll SECONDS] [--label] [--delivery pr-stack|agent]
 agent-mux project qa <n> [--only a,b] [--severity P] [--harness H] [--dry-run]
+agent-mux project qa-trail plan <milestone> [--harness H] [--critic H] [--dry-run]
+agent-mux project qa-trail run <milestone> [--only f1,f2] [--max-cycles N] [--parallel N] [--harness H] [--dry-run]
+agent-mux project qa-trail report <milestone> [--cycle N] [--json]
 agent-mux project insights [<n>] [--scope progress|tech|daily|brainstorm] [--topic "…"] [--harness H] [--dry-run]
 agent-mux project estimate <n> [--yes] [--discard] [--harness H] [--dry-run] [--json]
 agent-mux project refine <n> [--yes] [--discard] [--harness H] [--dry-run] [--json]
@@ -465,7 +493,7 @@ A read that fails never becomes a fact. A document whose listing failed is `unkn
 ## 9. Not built yet
 
 - Closing the hub issue of a cross-repository Story when it reaches Done, and a Bug or a Task across several repositories.
-- The QA of a milestone (the trail and its cycles), and the milestone's preflight and audit.
+- The milestone's preflight and audit, a container per Feature in the QA of a milestone, and the trail on the Milestones screen.
 - Starting the QA plan from the `spec-wave:qa` label, and the comments spec-wave leaves when the step is refused: the command prints the reason instead.
 - In the fleet: dispatching to a named developer from the screens (the command does it), the extra tracks of spec-wave's queue label (`devAgent.queues`), and rounds inside a run.
 - On the Observability screen: cost by model, critique attempts per document, and the time from Ready to Review.

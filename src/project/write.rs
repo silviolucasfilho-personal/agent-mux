@@ -236,6 +236,29 @@ pub fn comment(tools: &Tools, cfg: &ProjectConfig, number: u64, body: &str) -> R
     .map(|_| ())
 }
 
+/// Replaces a milestone's description.
+pub fn set_milestone_description(
+    tools: &Tools,
+    cfg: &ProjectConfig,
+    number: u64,
+    description: &str,
+) -> Result<(), String> {
+    gh(
+        tools,
+        cfg.root(),
+        &[
+            "api",
+            "-X",
+            "PATCH",
+            &format!("repos/{}/milestones/{number}", cfg.hub_repo().slug()),
+            "-f",
+            &format!("description={description}"),
+        ],
+        "gh api (milestone description)",
+    )
+    .map(|_| ())
+}
+
 /// Closes an issue. `reason` is GitHub's: `completed`, `not_planned` or
 /// `duplicate`.
 pub fn close(tools: &Tools, cfg: &ProjectConfig, number: u64, reason: &str) -> Result<(), String> {
