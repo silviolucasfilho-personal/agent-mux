@@ -13,6 +13,16 @@ use std::path::{Path, PathBuf};
 
 const USAGE: &str = "agent-mux project — a spec-wave repository's work items, read from GitHub
 
+  agent-mux project init [--repo <owner/repo>] [--title T] [--board N] [--skip-project] [--skip-labels] [--provider P] [--model M] [--yes]
+        make the repository in this folder a spec-wave repository: the board with
+        the Etapa field and its twelve stages, the flow's labels and a new
+        .spec-wave.json in spec-wave's own shape. Without --yes it reads and says
+        what it would do. Nothing that exists is changed: a label or a field that
+        is there stays as it is, a folder with the file is refused, and --board N
+        adopts a board (also how a run that stopped is finished)
+  agent-mux project init --role code --hub <owner/repo> [--repo <owner/repo>] [--yes]
+        a code repository of a hub: only the file is written
+
   agent-mux project doctor [--json]          what can be read, and what to fix
   agent-mux project sync                     read the Project from GitHub into the cache
   agent-mux project ls [--type T] [--stage S] [--milestone M] [--all] [--json]
@@ -140,6 +150,12 @@ the rest.";
 
 const VALUE_FLAGS: &[&str] = &[
     "--dir",
+    "--repo",
+    "--role",
+    "--hub",
+    "--provider",
+    "--model",
+    "--board",
     "--type",
     "--stage",
     "--milestone",
@@ -355,6 +371,7 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
     let rest = args.get(1..).unwrap_or_default();
     let a = Args::parse(rest);
     match args.first().map(String::as_str) {
+        Some("init") => cmd_init(&a),
         Some("doctor") => cmd_doctor(&a),
         Some("sync") => cmd_sync(&a),
         Some("ls") | Some("list") => cmd_ls(&a),
@@ -3839,6 +3856,122 @@ async fn cmd_audit(a: &Args) -> anyhow::Result<()> {
     println!("\n{}", audit_tail(&verdict));
     if problem {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// `project init`: the one command that runs where there is no
+/// `.spec-wave.json` yet, so it builds no [`Env`].
+fn cmd_init(a: &Args) -> anyhow::Result<()> {
+    use super::config::{RepoRef, Role};
+    use super::init;
+    let dir = match a.value("--dir") {
+        Some(d) => PathBuf::from(d),
+        None => std::env::current_dir()?,
+    };
+    let dir = dir
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("{}: {e}", dir.display()))?;
+    let role = match a.value("--role").unwrap_or("hub") {
+        "hub" => Role::Hub,
+        "code" => Role::Code,
+        other => anyhow::bail!("--role \"{other}\": use hub or code"),
+    };
+    let named = |flag: &str| -> anyhow::Result<Option<RepoRef>> {
+        a.value(flag)
+            .map(|v| {
+                RepoRef::parse(v)
+                    .ok_or_else(|| anyhow::anyhow!("{flag} \"{v}\": give it as owner/repo"))
+            })
+            .transpose()
+    };
+    // the folder's own repository, when it is a checkout with an origin
+    let origin = super::build::git(&dir, &["remote", "get-url", "origin"])
+        .ok()
+        .and_then(|url| init::repo_of_url(&url));
+    let repo = match (named("--repo")?, origin) {
+        (Some(r), Some(o)) if !r.slug().eq_ignore_ascii_case(&o.slug()) => anyhow::bail!(
+            "{} is a checkout of {}, not of {}: the file would name the wrong repository",
+            dir.display(),
+            o.slug(),
+            r.slug()
+        ),
+        (Some(r), _) => r,
+        (None, Some(o)) => o,
+        (None, None) => anyhow::bail!(
+            "which repository? {} has no `origin` remote: give --repo <owner/repo>",
+            dir.display()
+        ),
+    };
+    let provider = a
+        .value("--provider")
+        .unwrap_or(init::DEFAULT_PROVIDER)
+        .to_lowercase();
+    let model = a.value("--model").map(str::to_string).unwrap_or_else(|| {
+        init::PROVIDERS
+            .iter()
+            .find(|(p, _)| *p == provider)
+            .map(|(_, m)| m.to_string())
+            .unwrap_or_default()
+    });
+    let board = a
+        .value("--board")
+        .map(|v| {
+            v.trim_start_matches('#')
+                .parse::<u64>()
+                .map_err(|_| anyhow::anyhow!("--board \"{v}\": give the board's number"))
+        })
+        .transpose()?;
+    let req = init::Request {
+        title: a
+            .value("--title")
+            .map(str::to_string)
+            .unwrap_or_else(|| init::Request::default_title(&repo.repo)),
+        dir,
+        role,
+        repo,
+        hub: named("--hub")?,
+        provider,
+        model,
+        board,
+        skip_project: a.flag("--skip-project"),
+        skip_labels: a.flag("--skip-labels"),
+    };
+    let tools = Tools::default();
+    let plan = init::plan(&tools, &req).map_err(|e| anyhow::anyhow!(e))?;
+    println!(
+        "Project init: {} ({}), in {}",
+        req.repo.slug(),
+        if req.role == Role::Code {
+            "code"
+        } else {
+            "hub"
+        },
+        req.dir.display()
+    );
+    for l in init::plan_lines(&req, &plan) {
+        println!("{l}");
+    }
+    if !a.flag("--yes") || a.flag("--dry-run") {
+        println!("Nothing was written. Run it again with --yes to do it.");
+        return Ok(());
+    }
+    println!("Doing it:");
+    let done = init::execute(
+        &tools,
+        &req,
+        &plan,
+        &init::iso_now(),
+        init::LABEL_DELAY,
+        &mut |l| println!("  {l}"),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    for w in done.warnings.iter().skip(plan.warnings.len()) {
+        println!("  warning   {w}");
+    }
+    println!("Done. Next:");
+    for l in init::next_lines(&req, &done) {
+        println!("{l}");
     }
     Ok(())
 }

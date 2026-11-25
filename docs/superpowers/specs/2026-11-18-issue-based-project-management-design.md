@@ -1,6 +1,6 @@
 # Projects: every spec-wave flow, in agent-mux — design
 
-Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, phase 4 in nine parts (§19 to §31) and the first part of phase 5 (§32), with what each left out named there; the rest of phase 5 and phase 6 are not.
+Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, phase 4 in nine parts (§19 to §31) and the first part of phase 5 (§32), with what each left out named there; the rest of phase 5 is §33 to §36 and phase 6 is §37 and §38.
 
 **The requirement.** Any repository configured with spec-wave must open in
 agent-mux as a **Project** and work there: every flow spec-wave has, each
@@ -740,7 +740,8 @@ The 37 commands of the CLI, each with its place in agent-mux. A row marked
 | `code-review`, `qa --pr-number` (the Actions' movers) | the refresh's moves (§7.4) | Board |
 | `preflight`, `audit` | `project preflight`, `project audit` | Milestones |
 | `dev-agent` | the fleet (§8): `project dispatch`, `project fleet run` | Development |
-| `init`, `update`, `install-skill`, `uninstall` | *n/a* until phase 6 (`project init`) | |
+| `init` | `project init` (§38): the board, the labels and the file, no workflow files | |
+| `update`, `install-skill`, `uninstall` | *n/a*: spec-wave's CLI | |
 
 Skills not in the table by name: `preparar-specs` and `preparar-feature`
 are guided rounds (a milestone's specs; one Feature from spec to Ready).
@@ -1819,7 +1820,7 @@ Both read only.
 - **Not built:** the Preflight and Audit tabs of the Milestones screen
   and their keys (`P`, `A`, `g`): §36 built the tabs.
 - **Phase 5 is built** as §32 to §35 describe, less what each names.
-  Phase 6: §37 built the web pages; `project init` is not started.
+  Phase 6: §37 built the web pages and §38 `project init`.
 
 ## 36. Phase 5, the Milestones screen, as built
 
@@ -1886,4 +1887,64 @@ The web pages: `/api/project/` in the web explorer and its pages (§10).
   text, the Kanban columns of the Development screen as a page of their
   own, and a refresh when a sync lands (the pages follow the trace
   store's change feed, which a sync does not move: reload the page).
-- **Left of phase 6:** `project init`.
+- **Left of phase 6:** `project init`, which §38 built.
+
+## 38. Phase 6, second part, as built
+
+`agent-mux project init`: a repository that never had spec-wave's CLI
+becomes a spec-wave repository (§16, phase 6). The port of spec-wave's
+`init` (CLI 1.7.6) without its third phase.
+
+- **Decision 2 of §17, revised.** `.spec-wave.json` was never written.
+  The operator chose (2026-11-25) that `init` writes it once: a new file,
+  only in a folder that has none, only on `--yes`, in the CLI's exact
+  shape. A file that exists is still never touched, by `init` or by
+  anything else (`init::write_new` creates and never replaces).
+- **What it makes** (`project::init`): the board (`createProjectV2`),
+  `Etapa` with the twelve stages and their colours, `Work Item Type`,
+  `Priority`, `Story Points`, `Area` (one at a time, as Projects v2
+  requires), the text field `Release`, the link to the repository (a
+  refusal is a line), and the forty labels of spec-wave's `ALL_LABELS`
+  with their colours and descriptions (`gh label create`, 120 ms apart).
+  The names, colours and descriptions are frozen by tests.
+- **No workflow file.** agent-mux runs the steps, so spec-wave's files
+  phase (the Actions, the issue templates, `tech_context.yml`) is left
+  out: the result is what `spec-wave init --skip-files` makes. With no
+  `execution` key the file says `actions` and the repository has no flow
+  workflow, which the doctor reads as "no Action runs a step".
+- **The plan only reads** (`init::plan`, all that runs without `--yes`):
+  the owner and the repository in one query, the owner's boards with
+  the title, the repository's labels. It refuses a folder with the file
+  (before any read), a login that may not write, and an owner that
+  already has an open board with the title.
+- **Nothing that exists is changed.** A label that is there is not
+  created again and never updated (no `--force`). `--board N` adopts a
+  board: only the fields it lacks by name are added, and an `Etapa`
+  that lacks a stage is a warning, never an edit. A failure after the
+  board exists names `--board N`, which finishes the run with no second
+  board. The file is written last.
+- **The file** (`init::render_config`): spec-wave's keys in its order
+  (`version`, `role`, `owner`, `repo`, `tracker`, `scm`, `project`, `ai`,
+  `initializedAt`; a code repository: `version`, `role`, `owner`, `repo`,
+  `hub`, `initializedAt`), two spaces and one newline at the end, written
+  by an ordered writer since `serde_json` sorts keys. `project.fields`
+  holds every single-select field as the board was read back, `Status`
+  included, in the board's order: the shape the CLI's `refresh` writes,
+  so a move sets `Status` from the file. Checked against a real hub on
+  2026-11-25: the block read from its board equals the one in its file,
+  order included. `version` is the CLI version ported (`1.7.6`).
+- **A personal account is a warning**, where spec-wave refuses: the
+  refusal is about its GitHub App, which agent-mux's steps do not use.
+- **A code repository** (`--role code --hub o/r`): one read (both
+  repositories exist) and the file. The entry for the hub's
+  `repositories` is printed, since the hub's file is not changed.
+- **Probed** with gh 2.98.0 against a real hub, reads only: the three
+  queries, and that `gh api graphql -f` sends an `Int!` variable as a
+  string (the board's number is written into the query). The mutations
+  are spec-wave's own and run only against stand-ins in the tests
+  (`project::init`'s tests, `tests/it/project_init.rs`).
+- **Not built:** the workflow files, issue templates and
+  `tech_context.yml`; writing a code repository into its hub's file
+  (`repo link`); `update`, `refresh`, `mode`, `uninstall`; a wizard; a
+  key on the screens (a folder with no file has no Project screen to
+  press it on).
