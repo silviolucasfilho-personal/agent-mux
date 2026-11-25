@@ -1084,6 +1084,55 @@ fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 ]),
             )
         }
+        Modal::Edit(form) => {
+            let field = |i: usize, name: &str, value: String, choice: bool| {
+                let on = form.field == i;
+                let shown = if choice {
+                    format!("‹ {value} ›")
+                } else if on {
+                    format!("{value}▏")
+                } else {
+                    value
+                };
+                Line::from(vec![
+                    Span::styled(
+                        format!(" {} {name:<10}", if on { ">" } else { " " }),
+                        if on { key_style() } else { dim() },
+                    ),
+                    Span::raw(shown),
+                ])
+            };
+            let priority = form
+                .priority
+                .checked_sub(1)
+                .and_then(|i| PRIORITIES.get(i))
+                .copied()
+                .unwrap_or("none");
+            let milestone = form
+                .milestones
+                .get(form.milestone)
+                .cloned()
+                .unwrap_or_else(|| "none".to_string());
+            (
+                format!(" Edit #{} ", form.number),
+                vec![
+                    field(0, "title", form.title.clone(), false),
+                    field(1, "priority", priority.to_string(), true),
+                    field(2, "milestone", milestone, true),
+                    Line::from(Span::styled(
+                        "   the description opens in your editor, in place of this form",
+                        dim(),
+                    )),
+                ],
+                hints(&[
+                    ("Tab", "field"),
+                    ("←→", "choose"),
+                    ("Enter", "review"),
+                    ("Ctrl+O", "description"),
+                    ("Esc", "cancel"),
+                ]),
+            )
+        }
         Modal::Confirm { lines, .. } => (
             " This writes to GitHub ".to_string(),
             lines.iter().map(|l| Line::raw(format!(" {l}"))).collect(),
@@ -1140,6 +1189,7 @@ fn draw_foot(f: &mut Frame, area: Rect, v: &ProjectView) {
         }
         pairs.extend([
             ("m", "move"),
+            ("e", "edit"),
             ("c", "chat"),
             ("a", "agent"),
             ("E", "estimate"),
@@ -1155,6 +1205,7 @@ fn draw_foot(f: &mut Frame, area: Rect, v: &ProjectView) {
             ("Enter", "open"),
             ("r", "run next step"),
             ("n", "new"),
+            ("e", "edit"),
             ("m", "move"),
         ];
         if v.screen == Screen::Uat {

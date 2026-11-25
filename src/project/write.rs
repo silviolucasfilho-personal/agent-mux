@@ -280,6 +280,42 @@ pub fn close(tools: &Tools, cfg: &ProjectConfig, number: u64, reason: &str) -> R
     .map(|_| ())
 }
 
+/// Changes an issue's title, its milestone or both in one call.
+/// `milestone`: `Some(None)` takes the issue out of its milestone.
+/// Probed with `gh api --help` on 2026-11-25: `-F` sends an integer and
+/// the literal `null` as JSON, which is what GitHub's REST
+/// `PATCH /repos/{owner}/{repo}/issues/{n}` takes for `milestone`.
+pub fn patch_issue(
+    tools: &Tools,
+    cfg: &ProjectConfig,
+    number: u64,
+    title: Option<&str>,
+    milestone: Option<Option<u64>>,
+) -> Result<(), String> {
+    let mut args: Vec<String> = vec![
+        "api".into(),
+        "-X".into(),
+        "PATCH".into(),
+        format!("repos/{}/issues/{number}", cfg.hub_repo().slug()),
+    ];
+    if let Some(t) = title {
+        args.push("-f".into());
+        args.push(format!("title={t}"));
+    }
+    if let Some(m) = milestone {
+        args.push("-F".into());
+        args.push(match m {
+            Some(n) => format!("milestone={n}"),
+            None => "milestone=null".into(),
+        });
+    }
+    if args.len() == 4 {
+        return Ok(());
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    gh(tools, cfg.root(), &refs, "gh api (edit issue)").map(|_| ())
+}
+
 /// GitHub's database id of an issue.
 pub fn issue_id(tools: &Tools, cfg: &ProjectConfig, number: u64) -> Result<u64, String> {
     let what = "gh api (issue id)";
@@ -387,6 +423,32 @@ pub fn set_field(
             ("itemId", item_id),
             ("fieldId", &f.id),
             ("optionId", option_id),
+        ],
+    )?;
+    Ok(true)
+}
+
+/// Empties a field of a board item. `Ok(false)`: the board has no such
+/// field, and nothing was written. The input's keys (`projectId`,
+/// `itemId`, `fieldId`) were read from GitHub's schema on 2026-11-25.
+pub fn clear_field(
+    tools: &Tools,
+    cfg: &ProjectConfig,
+    board: &Board,
+    item_id: &str,
+    field: &str,
+) -> Result<bool, String> {
+    let Some(f) = board.fields.get(field) else {
+        return Ok(false);
+    };
+    graphql(
+        tools,
+        cfg.root(),
+        "mutation($projectId:ID!,$itemId:ID!,$fieldId:ID!){clearProjectV2ItemFieldValue(input:{projectId:$projectId,itemId:$itemId,fieldId:$fieldId}){projectV2Item{id}}}",
+        &[
+            ("projectId", &board.project_id),
+            ("itemId", item_id),
+            ("fieldId", &f.id),
         ],
     )?;
     Ok(true)

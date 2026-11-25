@@ -259,7 +259,7 @@ pub fn auto_moves(snap: &Snapshot) -> Vec<AutoMove> {
 }
 
 impl<'a> Ops<'a> {
-    fn read(&self, number: u64) -> Result<Item, String> {
+    pub(crate) fn read(&self, number: u64) -> Result<Item, String> {
         let mut items = read_items(self.tools, self.cfg, &[number])?;
         // the one asked for, whatever else the read returned
         let at = items.iter().position(|i| i.number == number).unwrap_or(0);
@@ -273,7 +273,7 @@ impl<'a> Ops<'a> {
             })
     }
 
-    fn board(&self) -> Result<Board, String> {
+    pub(crate) fn board(&self) -> Result<Board, String> {
         Board::resolve(self.tools, self.cfg, self.seen_board.as_deref())
     }
 

@@ -63,6 +63,18 @@ fn pull_of(v: &Value, repo: &str) -> Option<Pull> {
     })
 }
 
+/// A milestone from GitHub's REST object.
+pub(crate) fn milestone_of(m: &Value) -> Option<Milestone> {
+    Some(Milestone {
+        number: m.get("number").and_then(Value::as_u64)?,
+        title: text(m, "title"),
+        open: text(m, "state") == "open",
+        due: m.get("due_on").and_then(Value::as_str).map(str::to_string),
+        open_issues: m.get("open_issues").and_then(Value::as_u64).unwrap_or(0),
+        closed_issues: m.get("closed_issues").and_then(Value::as_u64).unwrap_or(0),
+    })
+}
+
 pub fn build(raw: &Raw, cfg: &ProjectConfig, now_ns: i64) -> Snapshot {
     let hub = raw.hub.clone();
     let board_id = cfg.board.as_ref().map(|b| b.id.as_str());
@@ -335,19 +347,7 @@ pub fn build(raw: &Raw, cfg: &ProjectConfig, now_ns: i64) -> Snapshot {
     }
 
     let milestones = match &raw.milestones {
-        Ok(list) => list
-            .iter()
-            .filter_map(|m| {
-                Some(Milestone {
-                    number: m.get("number").and_then(Value::as_u64)?,
-                    title: text(m, "title"),
-                    open: text(m, "state") == "open",
-                    due: m.get("due_on").and_then(Value::as_str).map(str::to_string),
-                    open_issues: m.get("open_issues").and_then(Value::as_u64).unwrap_or(0),
-                    closed_issues: m.get("closed_issues").and_then(Value::as_u64).unwrap_or(0),
-                })
-            })
-            .collect(),
+        Ok(list) => list.iter().filter_map(milestone_of).collect(),
         Err(e) => {
             warnings.push(format!("milestones were not read: {e}"));
             Vec::new()

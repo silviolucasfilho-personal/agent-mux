@@ -77,6 +77,7 @@ The left column holds the screens and, under them, the selected screen's rows. T
 | `Esc` | Clear the filter, then close |
 | `r` | Run the selected item's next step: a document step, or the build of a Story or the fix of a Bug |
 | `n` | New work item, under the selected one when it can have children |
+| `e` | Edit the selected item: its title, priority and milestone in a form, its description in your editor |
 | `m` | Move the selected item to a later stage |
 | `M` | Repair its stage: any stage, earlier ones included, with a reason |
 | `A` | Make the board moves its pull requests already justify |
@@ -108,11 +109,29 @@ The rules are spec-wave's:
 - **A Spike is moved by hand** on the board itself.
 - **A new item is born at its type's stage:** a Bug in triage (in Ready when P0), a Story or a Task in Ready and only under a parent, anything else in Backlog. It is put on the board, with its type, in the same step.
 - **Triage has three outcomes.** Accept adds `spec-wave:triaged` and moves the Bug to Ready; with a severity it replaces the priority label. A P2 or P3 Bug, or one with no severity, needs `spec-wave:bug-approved` first. Reject needs a reason and closes the issue as not planned. Duplicate needs the original's number, comments on both issues and closes this one. A reject and a duplicate never touch the stage.
+- **An edit changes four things of an issue.** `e` opens a form with the item's title, priority and milestone; `Enter` shows the changes and asks for your yes, and a field you did not change is not written. `Ctrl+O` on the form opens the description in your editor instead (`editor` in profiles.toml, `$VISUAL`, `$EDITOR`, `vi`): it is read from GitHub at that moment, and when the editor closes agent-mux asks before replacing it. A description that changed on GitHub in the meantime is never replaced. `agent-mux project edit <n>` does the same from a shell (below).
 - **The board follows the pull requests only when you say so.** With no Action running, nobody moves an item when its pull request is ready, approved or merged. `A` (and `agent-mux project advance`) lists those moves and makes them on your yes.
 
 What agent-mux writes on an issue (the parent line, the triage and repair comments) is in spec-wave's own words, so an issue reads the same whichever tool acted on it.
 
 Items that wait on you are also rows of the inbox (`I`), under **Projects**, for every Project read on this machine. `Enter` opens the item.
+
+### Editing an item
+
+```
+agent-mux project edit <n> --title "…"                the plan: what would change
+agent-mux project edit <n> --priority P1 --milestone "v2" --yes
+agent-mux project edit <n> --body-file new.md --yes   the whole description, from a file (- reads the input)
+```
+
+Without `--yes` the command reads the issue and prints what would change, and writes nothing. What it changes:
+
+- **The title, never the type.** The issue keeps its `[TYPE]` tag: you type the title without it, and a tag you type is dropped with a warning.
+- **The priority** is one of `P0` to `P3`, or `none`. The issue's priority label is replaced, never added to, and the board's `Priority` field is set or emptied with it. An issue that is not on the board changes only its label, and a board with no such field or option is said in a line.
+- **The milestone** is named by its title or its number, or `none`. It must exist: an unknown one is refused with the list of those there are. A closed one is a warning.
+- **The description** is replaced whole by the file's text. An empty file is refused. When the new text changes the `Depende de:` lines, which decide the order a Feature's Stories are built in, or drops an HTML comment tools read, the plan warns before you say yes.
+
+A value the issue already has is not a change: nothing is written for it, and a run with nothing to change says so. The title and the milestone are written in one call, then the description, then the priority; an error names what was written before it.
 
 ## 4. Running a step
 
@@ -532,6 +551,7 @@ agent-mux project story review <n>
 agent-mux project triage accept <n> [--severity P]
 agent-mux project triage reject <n> --reason "…"
 agent-mux project triage duplicate <n> --of <original>
+agent-mux project edit <n> [--title "…"] [--priority P|none] [--milestone M|none] [--body-file F] [--yes]
 agent-mux project advance [--yes]
 agent-mux project merge <n> [--yes] [--keep-branches] [--dry-run]
 agent-mux project workspace map|prepare --issue <n> [--json]
@@ -593,6 +613,6 @@ A read that fails never becomes a fact. A document whose listing failed is `unkn
 - On the Observability screen: cost by model, critique attempts per document, and the time from Ready to Review.
 - Recording a Tech Leader's decision on a finding (`risk-accepted`).
 - Driving the repository's own Actions by trigger label instead of agent-mux's flows.
-- Editing an item's title, body, milestone or priority from agent-mux.
+- In an edit: an item's type, assignees, area and other labels, creating a milestone, and the `Prioridade` line of a description, which stays as it was written when the priority changes.
 - The mouse on the Project screens.
 - From `project init`: spec-wave's workflow files and issue templates, the scaffold of `tech_context.yml`, registering a code repository in its hub's file, and `update`, `refresh`, `mode` and `uninstall` (use spec-wave's CLI for those).

@@ -23,6 +23,7 @@ mod loop_ui;
 mod mcp_protocol;
 mod persistent_sessions;
 mod project_audit;
+mod project_edit;
 mod project_fleet;
 mod project_init;
 mod project_steps;
