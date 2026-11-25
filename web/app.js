@@ -10,7 +10,7 @@
   const pages = [];
 
   // Nav groups in display order; a group with no page is not drawn.
-  const GROUPS = ['Overview', 'Sessions', 'Usage', 'Tools', 'Swarms/Runs', 'Library', 'Health'];
+  const GROUPS = ['Overview', 'Sessions', 'Usage', 'Tools', 'Swarms/Runs', 'Projects', 'Library', 'Health'];
   // Pages registered without a `group` land in their area's group.
   const DEFAULT_GROUP = {
     overview: 'Overview',
@@ -18,13 +18,14 @@
     usage: 'Usage',
     tools: 'Tools', skills: 'Tools',
     swarms: 'Swarms/Runs', bus: 'Swarms/Runs', runs: 'Swarms/Runs', inbox: 'Swarms/Runs',
+    projects: 'Projects',
     library: 'Library', agents: 'Library',
     health: 'Health',
   };
   // `g` + this key jumps to the page (a page may set its own `key`).
   const DEFAULT_KEY = {
     overview: 'o', sessions: 's', search: 'f', usage: 'u', tools: 't', skills: 'k',
-    swarms: 'w', bus: 'b', runs: 'r', inbox: 'i', library: 'l', agents: 'a', health: 'h',
+    swarms: 'w', bus: 'b', runs: 'r', inbox: 'i', projects: 'p', library: 'l', agents: 'a', health: 'h',
   };
 
   // ---- page registry -----------------------------------------------------

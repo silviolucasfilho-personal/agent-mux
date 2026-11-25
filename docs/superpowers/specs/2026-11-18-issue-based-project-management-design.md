@@ -1819,7 +1819,7 @@ Both read only.
 - **Not built:** the Preflight and Audit tabs of the Milestones screen
   and their keys (`P`, `A`, `g`): §36 built the tabs.
 - **Phase 5 is built** as §32 to §35 describe, less what each names.
-  Phase 6 (`project init`, the web pages) is not started.
+  Phase 6: §37 built the web pages; `project init` is not started.
 
 ## 36. Phase 5, the Milestones screen, as built
 
@@ -1856,3 +1856,34 @@ and audit as tabs, after Features and Order.
 - **Not built:** `g` (generate the missing specs of a milestone: `r` on
   each Feature does it), and the set critique's findings in the Audit
   tab: they are in the process's output file.
+
+## 37. Phase 6, first part, as built
+
+The web pages: `/api/project/` in the web explorer and its pages (§10).
+
+- **Everything is answered from the cache.** `web::project` reads the
+  snapshot `project::store` keeps, the fleet's dispatches and the
+  sessions of the trace store through a read-only connection. No route
+  calls `gh`: a page shows the last read and says when it was. A hub
+  that was never read is a 404 that names `agent-mux project sync`.
+- **Routes:** `GET /api/project/list` (the cached hubs),
+  `/api/project/board?hub=` (items, stages, milestones with each
+  Feature's documents, dispatches, `project_report::item_totals`),
+  `/api/project/item?hub=&n=` (the item as `cli::item_json`, the card's
+  lines, ancestors, children, `order::feature_order`, its dispatch and
+  its trace: `project_report::report`, `runs`, `tree_lines`) and
+  `/api/project/activity?hub=` (`observability_lines`). The hub is a
+  query key, since it has a slash. POST aliases serve the SPA's client.
+- **Pages** (`web/project.js`, group Projects, `g p`): Projects, Project
+  (Board · Needs you · Milestones · Fleet · Activity, the view in the
+  query string) and Item (Card · Children · Order · Documents · Pull
+  requests · Trace). A session of the trace opens the session viewer
+  and a run opens its workflow run.
+- **Read-only.** No verb, no step, no merge, no dispatch and no sync
+  from the web: the explorer starts no process and writes nothing.
+- **Not built:** a milestone's QA trail, preflight and audit (they read
+  a checkout or `gh`), an issue's thread (a `gh` read), a document's
+  text, the Kanban columns of the Development screen as a page of their
+  own, and a refresh when a sync lands (the pages follow the trace
+  store's change feed, which a sync does not move: reload the page).
+- **Left of phase 6:** `project init`.

@@ -22,6 +22,7 @@ fn the_spa_and_its_assets_are_served() {
         "swarm.js",
         "runs.js",
         "library.js",
+        "project.js",
     ] {
         assert!(body.contains(&format!("/static/{script}")), "{script}");
         let (status, ctype, text) = get(&base, &format!("/static/{script}"));

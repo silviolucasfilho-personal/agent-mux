@@ -532,6 +532,10 @@ A read of GitHub takes a few seconds per hundred issues, so it is kept in the tr
 
 The cache holds every open issue and the ones closed in the last 30 days. It is only a cache: delete the rows and `agent-mux project sync` brings everything back.
 
+### In the browser
+
+`agent-mux web` has a Projects group (`g p`): the hubs read on this machine, a Project's board, what waits on a person, its milestones, the fleet and what its steps cost, and each item with its card, children, order, documents, pull requests and sessions. The pages are read-only and are answered from the cache, so they show the last read; `agent-mux project sync` reads GitHub again. See [the web guide](web.md#projects).
+
 ## 8. What is read, and how
 
 Everything goes through `gh`; agent-mux reads no token. A verb reads the issue it acts on at that moment, never from the cache.

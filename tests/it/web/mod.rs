@@ -5,6 +5,7 @@ pub mod support;
 
 mod core;
 mod library;
+mod project;
 mod runs;
 mod session;
 mod swarm;
