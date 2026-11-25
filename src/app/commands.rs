@@ -44,6 +44,9 @@ impl App {
             _ => None,
         };
         let in_swarm = matches!(self.mode, Mode::Swarm(_));
+        // the Project screens answer their own verbs: a key that does not
+        // apply to the row says why there
+        let in_project = matches!(self.mode, Mode::Project(_));
         // the Factory: the item under the cursor, or the brain row
         let factory = match &self.mode {
             Mode::Factory(v) => Some(v),
@@ -110,12 +113,14 @@ impl App {
                     || matches!(self.mode, Mode::Project(_))
             }
             Edit => {
-                matches!(
-                    row,
-                    Some(AgentKind::Persona(_) | AgentKind::Loop(_) | AgentKind::Flow(_))
-                ) || (main_list
-                    && self.sidebar_section == super::SidebarSection::Loops
-                    && self.selected_loop().is_some())
+                in_project
+                    || matches!(
+                        row,
+                        Some(AgentKind::Persona(_) | AgentKind::Loop(_) | AgentKind::Flow(_))
+                    )
+                    || (main_list
+                        && self.sidebar_section == super::SidebarSection::Loops
+                        && self.selected_loop().is_some())
                     || (main_list
                         && self.sidebar_section == super::SidebarSection::Workflows
                         && self.selected_workflow_entry().is_some())
@@ -131,7 +136,8 @@ impl App {
                     })
             }
             Delete => {
-                matches!(row, Some(AgentKind::Loop(_)))
+                in_project
+                    || matches!(row, Some(AgentKind::Loop(_)))
                     || (main_list
                         && self.sidebar_section == super::SidebarSection::Loops
                         && self.selected_loop().is_some())
@@ -159,18 +165,20 @@ impl App {
                     )
             }
             Run => {
-                matches!(
-                    row,
-                    Some(
-                        AgentKind::Persona(_)
-                            | AgentKind::Loop(_)
-                            | AgentKind::Flow(_)
-                            | AgentKind::Skill(_)
+                in_project
+                    || matches!(
+                        row,
+                        Some(
+                            AgentKind::Persona(_)
+                                | AgentKind::Loop(_)
+                                | AgentKind::Flow(_)
+                                | AgentKind::Skill(_)
+                        )
                     )
-                ) || (matches!(row, Some(AgentKind::Session(_)))
-                    && session.is_some_and(|s| {
-                        matches!(s.status(Instant::now()), crate::status::Status::Exited(_))
-                    }))
+                    || (matches!(row, Some(AgentKind::Session(_)))
+                        && session.is_some_and(|s| {
+                            matches!(s.status(Instant::now()), crate::status::Status::Exited(_))
+                        }))
                     || (main_list
                         && self.sidebar_section == super::SidebarSection::History
                         && !self.history_sessions.is_empty())
@@ -194,10 +202,11 @@ impl App {
                     || matches!(&self.mode, Mode::SessionHistory(h) if !h.sessions.is_empty())
             }
             Stop => {
-                (matches!(row, Some(AgentKind::Session(_)))
-                    && session.is_some_and(|s| {
-                        !matches!(s.status(Instant::now()), crate::status::Status::Exited(_))
-                    }))
+                in_project
+                    || (matches!(row, Some(AgentKind::Session(_)))
+                        && session.is_some_and(|s| {
+                            !matches!(s.status(Instant::now()), crate::status::Status::Exited(_))
+                        }))
                     || matches!(row, Some(AgentKind::Flow(_)))
                     || runs_item.is_some_and(|i| {
                         matches!(i.run, RunRef::LoopLive { .. } | RunRef::FlowLive(_))
@@ -231,7 +240,8 @@ impl App {
                     | Mode::Langfuse(_)
             ),
             Restore => {
-                editor_library
+                in_project
+                    || editor_library
                     || config_item
                     || matches!(&self.mode, Mode::AgentEditor(st) if matches!(&st.body, super::agent_editor::Body::Persona(p) if p.copy_of_builtin))
             }

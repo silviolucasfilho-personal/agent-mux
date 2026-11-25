@@ -1,6 +1,6 @@
 # Projects: every spec-wave flow, in agent-mux — design
 
-Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, phase 4 in nine parts (§19 to §31) and the first part of phase 5 (§32), with what each left out named there; the rest of phase 5 is §33 to §36 and phase 6 is §37 and §38.
+Status: proposal, 2026-11-18 (third draft). Phases 1, 2 and 3 are implemented, phase 4 in nine parts (§19 to §31) and the first part of phase 5 (§32), with what each left out named there; the rest of phase 5 is §33 to §36 and phase 6 is §37 and §38. §39 on are what was built after the phases.
 
 **The requirement.** Any repository configured with spec-wave must open in
 agent-mux as a **Project** and work there: every flow spec-wave has, each
@@ -741,6 +741,7 @@ The 37 commands of the CLI, each with its place in agent-mux. A row marked
 | `preflight`, `audit` | `project preflight`, `project audit` | Milestones |
 | `dev-agent` | the fleet (§8): `project dispatch`, `project fleet run` | Development |
 | `init` | `project init` (§38): the board, the labels and the file, no workflow files | |
+| *(none: an issue is edited on GitHub)* | `project edit` (§39): title, priority, milestone, description | every screen (`e`) |
 | `update`, `install-skill`, `uninstall` | *n/a*: spec-wave's CLI | |
 
 Skills not in the table by name: `preparar-specs` and `preparar-feature`
@@ -1948,3 +1949,64 @@ becomes a spec-wave repository (§16, phase 6). The port of spec-wave's
   (`repo link`); `update`, `refresh`, `mode`, `uninstall`; a wizard; a
   key on the screens (a folder with no file has no Project screen to
   press it on).
+
+## 39. After the phases: editing an item, as built
+
+`agent-mux project edit <n>` and `e` on the screens: the operator changes
+an issue's title, priority, milestone or description without leaving
+agent-mux. spec-wave's CLI has no such command (an issue is edited on
+GitHub's site), so the rules are agent-mux's own, chosen so that what
+spec-wave reads stays true.
+
+- **Two steps** (`project::edit`): `Ops::edit_plan` reads the issue now
+  (and the milestones or the description only when the edit names them)
+  and resolves an `EditPlan`; `Ops::edit_write` writes it. A field that
+  already has the value asked for is not in the plan, and an empty plan
+  writes nothing. The command prints the plan and stops without `--yes`.
+- **The title keeps its `[TYPE]` tag** (`edit::new_title`): the tag is
+  the item's type for both tools. A tag typed in the new title is
+  dropped, with a warning when it differs from the issue's.
+- **The priority** is the label and the board's `Priority` field, as
+  `new_item` writes them. The new label is added before the old ones are
+  removed; `none` removes them and empties the field
+  (`write::clear_field`, the mutation `clearProjectV2ItemFieldValue`). An
+  issue with no board item changes only its label, and a board with no
+  such field or option is a line, never an error.
+- **The milestone** is named by title (any case) or number
+  (`edit::resolve_milestone`; a title wins over a number) and must
+  exist; `none` takes the issue out. A closed one is a warning. The title
+  and the milestone go in one REST call (`write::patch_issue`:
+  `gh api -X PATCH repos/<o>/<r>/issues/<n> -f title=… -F milestone=<n>|null`).
+- **The description** is replaced whole (`write::set_body`). An empty
+  one is refused. `edit::body_warnings` warns when the `Depende de:`
+  lines change or an HTML comment is dropped; unlike `refine`, where a
+  model wrote the text, the operator may change them. With `body_base`
+  (the hash of the text the new one was written from) a description that
+  changed on GitHub since is never replaced.
+- **On the screens** `e` opens `Modal::Edit` (`EditForm`: title,
+  priority, milestone; the snapshot's open milestones and the item's
+  own), which ends in the same confirmation as every verb and runs as
+  `Op::Edit`. `Ctrl+O` on the form leaves it for the description:
+  `App::project_edit_body` reads it on a thread, the tick writes it under
+  the scratch folder and asks for the operator's editor
+  (`EditorRequest`, `project::BODY_EDITOR`), and
+  `App::project_body_edited` asks for the yes when the text changed.
+- **A fault this found:** `r`, `x`, `d` and `R` on the Project screens
+  never reached them through the app's key path. The shared action
+  registry (`App::command_availability`) matched them as Run, Stop,
+  Delete and Restore, found them unavailable on this screen and
+  swallowed the key; the screens' tests called `handle_project_key`
+  directly, so none saw it. The registry now leaves the local verbs to
+  the Project screens, and `tests/it/project_ui.rs` presses its keys
+  through `App::handle_key`.
+- **Probed** on 2026-11-25, reads only: GitHub's schema for
+  `ClearProjectV2ItemFieldValueInput` (`projectId`, `itemId`, `fieldId`),
+  `gh api --help` for `-F` (an integer and `null` are sent as JSON), and
+  the plan against a real hub without `--yes`. The writes ran only
+  against stand-ins (`project::edit`'s tests, `tests/it/project_edit.rs`,
+  `tests/it/project_ui.rs`).
+- **Not built:** an item's type, assignees, area and other labels;
+  creating a milestone; the `Prioridade` line of a description's
+  `## Metadados`, which is left as written when the priority changes (as
+  `triage accept --severity` leaves it); the description in the form
+  itself.

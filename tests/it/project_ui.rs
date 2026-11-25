@@ -120,6 +120,8 @@ case "$*" in
   "label list"*) echo '[]' ;;
   "auth status"*) echo 'Logged in' ;;
   "issue view"*) cat "$d/thread.json" ;;
+  "issue edit"*) echo ok ;;
+  "api -X PATCH repos/acme/hub/issues/"*) echo '{{}}' ;;
   *) echo "unexpected: $*" >&2; exit 2 ;;
 esac
 "#,
@@ -701,4 +703,173 @@ fn a_milestones_trail_preflight_and_audit_are_read_into_its_tabs() {
         std::fs::read_to_string(f.ws.join(".spec-wave.json")).unwrap(),
         CONFIG
     );
+}
+
+/// The Board with the cursor on an item, after the first read.
+fn on_board_item(f: &mut Fixture, number: u64) {
+    f.app.open_project();
+    wait(&mut f.app, "the read", |a| view(a).snap.is_some());
+    wait(&mut f.app, "the checks", |a| view(a).checks.is_some());
+    f.app.handle_key(&key(KeyCode::Char(']')), Instant::now());
+    let at = view(&f.app)
+        .rows
+        .iter()
+        .position(|r| matches!(r, Row::Item { number: n, .. } if *n == number))
+        .unwrap();
+    for _ in 0..at {
+        f.app.handle_key(&key(KeyCode::Down), Instant::now());
+    }
+}
+
+/// The calls after the first `skip` that are not reads of issues.
+fn writes_after(f: &Fixture, skip: usize) -> Vec<String> {
+    std::fs::read_to_string(&f.calls)
+        .unwrap()
+        .lines()
+        .skip(skip)
+        .filter(|l| !l.contains("issue(number:") && !l.starts_with("issue view"))
+        .map(|l| l.trim().to_string())
+        .collect()
+}
+
+#[test]
+fn an_edit_is_confirmed_then_written_through_the_apps_own_keys() {
+    use agent_mux::app::project::Modal;
+    let mut f = fixture();
+    on_board_item(&mut f, 2);
+    let before = std::fs::read_to_string(&f.calls).unwrap().lines().count();
+    let now = Instant::now();
+
+    // the verbs of the Project screens reach it through the app's key
+    // path, where the shared registry sees them first
+    f.app.handle_key(&key(KeyCode::Char('e')), now);
+    assert!(
+        matches!(view(&f.app).modal, Some(Modal::Edit(_))),
+        "{:?}",
+        f.app.notice
+    );
+    let form = render(&f.app);
+    assert!(form.contains("Edit #2"), "{form}");
+    assert!(form.contains("ver pedidos"), "{form}");
+    // letters are the title's while the form is open, verbs included
+    for c in " de hoje".chars() {
+        f.app.handle_key(&key(KeyCode::Char(c)), now);
+    }
+    f.app.handle_key(&key(KeyCode::Tab), now);
+    f.app.handle_key(&key(KeyCode::Right), now);
+    f.app.handle_key(&key(KeyCode::Tab), now);
+    f.app.handle_key(&key(KeyCode::Right), now);
+    f.app.handle_key(&key(KeyCode::Enter), now);
+    let confirm = render(&f.app);
+    assert!(confirm.contains("This writes to GitHub"), "{confirm}");
+    assert!(confirm.contains("Change #2:"), "{confirm}");
+    assert!(confirm.contains("priority: none → P0"), "{confirm}");
+    assert!(confirm.contains("milestone: none → v1"), "{confirm}");
+    assert!(
+        writes_after(&f, before).is_empty(),
+        "nothing before the yes"
+    );
+
+    f.app.handle_key(&key(KeyCode::Char('y')), now);
+    assert!(view(&f.app).busy.is_some());
+    wait(&mut f.app, "the edit", |a| view(a).busy.is_none());
+    // the title with its tag and the milestone in one call, then the
+    // label; this board has no Priority field, which is said and not written
+    assert_eq!(
+        writes_after(&f, before),
+        vec![
+            "api repos/acme/hub/milestones?state=all&per_page=100",
+            "api -X PATCH repos/acme/hub/issues/2 -f title=[STORY] ver pedidos de hoje -F milestone=1",
+            "issue edit 2 -R acme/hub --add-label P0",
+        ]
+    );
+    let said = f
+        .app
+        .notice
+        .as_ref()
+        .map(|n| n.text.clone())
+        .unwrap_or_default();
+    assert!(said.contains("#2: priority → P0"), "{said}");
+    assert!(said.contains("the board has no `Priority` field"), "{said}");
+
+    // the run key reaches the screen too: it answers, and is not refused
+    // by the registry
+    f.app.handle_key(&key(KeyCode::Char('r')), now);
+    let refused = f
+        .app
+        .notice
+        .as_ref()
+        .is_some_and(|n| n.text.contains("Unavailable for this screen"));
+    assert!(!refused, "{:?}", f.app.notice);
+}
+
+#[test]
+fn a_description_is_edited_in_the_editor_and_written_only_after_the_yes() {
+    use agent_mux::app::project::{BODY_EDITOR, Modal};
+    let mut f = fixture();
+    on_board_item(&mut f, 2);
+    let before = std::fs::read_to_string(&f.calls).unwrap().lines().count();
+    let now = Instant::now();
+    let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+    let open = |f: &mut Fixture| {
+        f.app.handle_key(&key(KeyCode::Char('e')), now);
+        f.app.handle_key(&ctrl_o, now);
+        assert!(view(&f.app).modal.is_none());
+        wait(&mut f.app, "the description", |a| {
+            a.editor_request.is_some()
+        });
+        let request = f.app.take_editor_request().unwrap();
+        assert_eq!(request.asset_id, BODY_EDITOR);
+        // the file holds what GitHub has now
+        assert_eq!(
+            std::fs::read_to_string(&request.path).unwrap(),
+            "Como cliente quero cancelar"
+        );
+        request
+    };
+
+    // closed with no change: nothing is asked and nothing is written
+    let request = open(&mut f);
+    let path = request.path.clone();
+    f.app.editor_finished(request, Ok(()));
+    assert!(view(&f.app).modal.is_none());
+    let said = f
+        .app
+        .notice
+        .as_ref()
+        .map(|n| n.text.clone())
+        .unwrap_or_default();
+    assert!(said.contains("was not changed"), "{said}");
+    assert!(!path.exists(), "the file is removed");
+
+    // changed: a confirmation, and the write only after the yes
+    let request = open(&mut f);
+    std::fs::write(&request.path, "Como cliente quero cancelar o pedido\n").unwrap();
+    f.app.editor_finished(request, Ok(()));
+    let Some(Modal::Confirm { lines, .. }) = &view(&f.app).modal else {
+        panic!("no confirmation: {:?}", view(&f.app).modal)
+    };
+    assert!(
+        lines[0].contains("Replace the description of #2 (27 → 36 characters)"),
+        "{lines:?}"
+    );
+    assert!(
+        writes_after(&f, before).is_empty(),
+        "nothing before the yes"
+    );
+    f.app.handle_key(&key(KeyCode::Char('y')), now);
+    wait(&mut f.app, "the write", |a| view(a).busy.is_none());
+    let writes = writes_after(&f, before);
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert!(
+        writes[0].starts_with("issue edit 2 -R acme/hub --body-file "),
+        "{writes:?}"
+    );
+    let said = f
+        .app
+        .notice
+        .as_ref()
+        .map(|n| n.text.clone())
+        .unwrap_or_default();
+    assert!(said.contains("the description was replaced"), "{said}");
 }

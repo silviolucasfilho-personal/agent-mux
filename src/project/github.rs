@@ -423,19 +423,7 @@ pub fn fetch(tools: &Tools, cfg: &ProjectConfig) -> Result<Raw, String> {
                 Err(e) => Err(e),
             }
         });
-        let milestones = scope.spawn(|| {
-            gh(
-                tools,
-                cwd,
-                &[
-                    "api",
-                    &format!("repos/{slug}/milestones?state=all&per_page=100"),
-                ],
-                "gh api (milestones)",
-            )
-            .and_then(|o| json(&o, "gh api (milestones)"))
-            .map(|v| v.as_array().cloned().unwrap_or_default())
-        });
+        let milestones = scope.spawn(|| milestones(tools, cwd, &slug));
         let docs = scope.spawn(|| doc_files(tools, cwd, &hub));
         let open_pulls = scope.spawn(|| pull_list(tools, cwd, &slug, "open", 200));
         let branches = scope.spawn(|| {
@@ -768,6 +756,22 @@ pub fn close_reason(tools: &Tools, cfg: &ProjectConfig, number: u64) -> Result<S
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string())
+}
+
+/// Every milestone of a repository, open or closed (REST objects).
+pub fn milestones(tools: &Tools, cwd: &Path, slug: &str) -> Result<Vec<Value>, String> {
+    let what = "gh api (milestones)";
+    gh(
+        tools,
+        cwd,
+        &[
+            "api",
+            &format!("repos/{slug}/milestones?state=all&per_page=100"),
+        ],
+        what,
+    )
+    .and_then(|o| json(&o, what))
+    .map(|v| v.as_array().cloned().unwrap_or_default())
 }
 
 pub fn issue_detail(tools: &Tools, cfg: &ProjectConfig, number: u64) -> Result<Detail, String> {

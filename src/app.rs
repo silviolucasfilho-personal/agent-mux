@@ -7736,6 +7736,10 @@ impl App {
             self.agent_editor_text_finished(&request.path);
             return;
         }
+        if request.asset_id == project::BODY_EDITOR {
+            self.project_body_edited(&request.path);
+            return;
+        }
         if request.asset_id == "trace:reader" {
             let _ = std::fs::remove_file(&request.path);
             return;

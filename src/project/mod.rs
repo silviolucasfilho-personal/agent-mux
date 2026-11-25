@@ -27,6 +27,7 @@ pub mod decomposition;
 pub mod deliver;
 pub mod docs;
 pub mod doctor;
+pub mod edit;
 pub mod fix_pr;
 pub mod fleet;
 pub mod github;

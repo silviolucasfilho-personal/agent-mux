@@ -207,6 +207,8 @@ pub enum Outcome {
     Agent(u64, String),
     /// Make this change on GitHub: the operator confirmed it.
     Run(Op),
+    /// Read this issue's description and open it in the operator's editor.
+    EditBody(u64),
 }
 
 #[derive(Debug)]
@@ -266,6 +268,32 @@ pub struct ProjectView {
     sync_rx: Option<Receiver<Result<Snapshot, String>>>,
     health_rx: Option<Receiver<Vec<Check>>>,
     thread_rx: Option<Receiver<Thread>>,
+    /// A description being read for the editor.
+    body_rx: Option<Receiver<BodyRead>>,
+    /// The description that is open in the editor.
+    pub body_edit: Option<BodyEdit>,
+}
+
+/// An issue's description, read for the editor.
+pub struct BodyRead {
+    pub number: u64,
+    pub body: Result<String, String>,
+}
+
+impl std::fmt::Debug for BodyRead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BodyRead")
+            .field("number", &self.number)
+            .finish()
+    }
+}
+
+/// A description open in the editor: the file, and what GitHub had.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BodyEdit {
+    pub number: u64,
+    pub path: PathBuf,
+    pub base: String,
 }
 
 impl ProjectView {
@@ -316,6 +344,8 @@ impl ProjectView {
             sync_rx: None,
             health_rx: None,
             thread_rx: None,
+            body_rx: None,
+            body_edit: None,
         }
     }
 
@@ -327,7 +357,11 @@ impl ProjectView {
     }
 
     pub fn text_entry_active(&self) -> bool {
-        self.filtering || matches!(self.modal, Some(Modal::Text { .. } | Modal::New(_)))
+        self.filtering
+            || matches!(
+                self.modal,
+                Some(Modal::Text { .. } | Modal::New(_) | Modal::Edit(_))
+            )
     }
 
     pub fn confirmation_active(&self) -> bool {
@@ -696,7 +730,7 @@ impl ProjectView {
             && let KeyCode::Char(c) = key.code
             && matches!(
                 c,
-                'm' | 'M' | 't' | 'R' | 'D' | 'r' | 'E' | 'W' | 'c' | 'a' | 'Q'
+                'm' | 'M' | 't' | 'R' | 'D' | 'r' | 'E' | 'W' | 'c' | 'a' | 'Q' | 'e'
             )
         {
             return self.verb_key(c).unwrap_or(Outcome::None);
@@ -918,6 +952,9 @@ pub fn agent_opening(agent: &str, item: &Item, snap: &Snapshot) -> String {
     l.join("\n")
 }
 
+/// The editor request of an issue's description (`EditorRequest.asset_id`).
+pub const BODY_EDITOR: &str = "project:body";
+
 /// A change on GitHub, as the operator asked for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
@@ -955,6 +992,11 @@ pub enum Op {
         /// A few words: "the fix-pr step", "the merge".
         what: String,
     },
+    /// The title, priority, milestone or description of an issue.
+    Edit {
+        number: u64,
+        edit: crate::project::edit::Edit,
+    },
 }
 
 impl Op {
@@ -971,6 +1013,7 @@ impl Op {
             Op::Advance(m) => format!("making {} board move(s)", m.len()),
             Op::RunStep { number, .. } => format!("starting the next step of #{number}"),
             Op::Process { number, what, .. } => format!("starting {what} of #{number}"),
+            Op::Edit { number, .. } => format!("editing #{number}"),
         }
     }
 }
@@ -1010,6 +1053,105 @@ pub struct NewForm {
     pub field: usize,
 }
 
+/// The edit form: an item's title, priority and milestone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditForm {
+    pub number: u64,
+    /// The title without its `[TYPE]` tag, which an edit never changes.
+    pub title: String,
+    /// 0 is none; then an index into the priorities, plus one.
+    pub priority: usize,
+    /// "none", then the milestones the item may be put in.
+    pub milestones: Vec<String>,
+    pub milestone: usize,
+    /// The field with the keyboard: title, priority, milestone.
+    pub field: usize,
+    /// What the item had when the form opened: title, priority, milestone.
+    pub was: (String, usize, usize),
+}
+
+impl EditForm {
+    /// The form of an item, from the snapshot: its own milestone, then
+    /// the open ones.
+    pub fn of(item: &Item, snap: &Snapshot) -> Self {
+        let mut milestones = vec![crate::project::edit::NONE.to_string()];
+        milestones.extend(
+            snap.milestones
+                .iter()
+                .filter(|m| m.open || Some(&m.title) == item.milestone.as_ref())
+                .map(|m| m.title.clone()),
+        );
+        if let Some(own) = &item.milestone
+            && !milestones[1..].contains(own)
+        {
+            milestones.push(own.clone());
+        }
+        let milestone = item
+            .milestone
+            .as_ref()
+            .and_then(|own| milestones[1..].iter().position(|m| m == own))
+            .map_or(0, |i| i + 1);
+        let priority = item
+            .priority
+            .as_ref()
+            .and_then(|p| PRIORITIES.iter().position(|x| x == p))
+            .map_or(0, |i| i + 1);
+        let title = item.name().to_string();
+        EditForm {
+            number: item.number,
+            was: (title.clone(), priority, milestone),
+            title,
+            priority,
+            milestones,
+            milestone,
+            field: 0,
+        }
+    }
+
+    fn priority_name(i: usize) -> &'static str {
+        i.checked_sub(1)
+            .and_then(|i| PRIORITIES.get(i))
+            .copied()
+            .unwrap_or(crate::project::edit::NONE)
+    }
+
+    /// What the operator changed, and a line for each change.
+    pub fn changes(&self) -> (crate::project::edit::Edit, Vec<String>) {
+        let mut edit = crate::project::edit::Edit::default();
+        let mut lines = Vec::new();
+        let title = self.title.trim();
+        if title != self.was.0 {
+            lines.push(format!(
+                "title: «{}» → «{title}» (its [TYPE] tag stays)",
+                self.was.0
+            ));
+            edit.title = Some(title.to_string());
+        }
+        if self.priority != self.was.1 {
+            let to = Self::priority_name(self.priority);
+            lines.push(format!(
+                "priority: {} → {to} (the label and the board's field)",
+                Self::priority_name(self.was.1)
+            ));
+            edit.priority = Some(self.priority.checked_sub(1).map(|_| to.to_string()));
+        }
+        if self.milestone != self.was.2 {
+            let name = |i: usize| self.milestones.get(i).map_or("none", String::as_str);
+            lines.push(format!(
+                "milestone: {} → {}",
+                name(self.was.2),
+                name(self.milestone)
+            ));
+            edit.milestone = Some(
+                self.milestone
+                    .checked_sub(1)
+                    .and_then(|_| self.milestones.get(self.milestone).cloned()),
+            );
+        }
+        (edit, lines)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Modal {
     Pick {
@@ -1024,6 +1166,7 @@ pub enum Modal {
         text: String,
     },
     New(NewForm),
+    Edit(EditForm),
     /// What will be written, and the operator's yes.
     Confirm {
         lines: Vec<String>,
@@ -1198,6 +1341,7 @@ impl ProjectView {
                     | 'a'
                     | 'I'
                     | 'Q'
+                    | 'e'
             )
             && !(c == 'C' && self.selected_milestone().is_some())
         {
@@ -1393,6 +1537,13 @@ impl ProjectView {
                         .collect(),
                     cursor: 0,
                 });
+            }
+            'e' => {
+                let Some(it) = target else {
+                    return need("edit");
+                };
+                let form = self.snap.as_ref().map(|s| EditForm::of(&it, s));
+                self.modal = form.map(Modal::Edit);
             }
             'E' | 'W' => {
                 use crate::project::assist::{self, Kind};
@@ -2024,6 +2175,60 @@ impl ProjectView {
                     _ => {}
                 }
                 self.modal = Some(Modal::New(form));
+            }
+            Modal::Edit(mut form) => {
+                match key.code {
+                    // the description is edited as a file, not in this form
+                    KeyCode::Char('o') if ctrl => return Outcome::EditBody(form.number),
+                    KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % 3,
+                    KeyCode::BackTab | KeyCode::Up => form.field = (form.field + 2) % 3,
+                    KeyCode::Left | KeyCode::Right if form.field == 1 => {
+                        let n = PRIORITIES.len() + 1;
+                        form.priority = if key.code == KeyCode::Right {
+                            (form.priority + 1) % n
+                        } else {
+                            (form.priority + n - 1) % n
+                        };
+                    }
+                    KeyCode::Left | KeyCode::Right if form.field == 2 => {
+                        let n = form.milestones.len().max(1);
+                        form.milestone = if key.code == KeyCode::Right {
+                            (form.milestone + 1) % n
+                        } else {
+                            (form.milestone + n - 1) % n
+                        };
+                    }
+                    KeyCode::Backspace if form.field == 0 => {
+                        form.title.pop();
+                    }
+                    KeyCode::Char(c) if !ctrl && form.field == 0 => form.title.push(c),
+                    KeyCode::Enter => {
+                        if form.title.trim().is_empty() {
+                            form.field = 0;
+                            self.modal = Some(Modal::Edit(form));
+                            return Outcome::Notice("a title is needed".into());
+                        }
+                        let (edit, changes) = form.changes();
+                        if changes.is_empty() {
+                            self.modal = Some(Modal::Edit(form));
+                            return Outcome::Notice(
+                                "nothing was changed: [Esc] closes the form".into(),
+                            );
+                        }
+                        let mut lines = vec![format!("Change #{}:", form.number)];
+                        lines.extend(changes);
+                        self.confirm(
+                            lines,
+                            Op::Edit {
+                                number: form.number,
+                                edit,
+                            },
+                        );
+                        return Outcome::None;
+                    }
+                    _ => {}
+                }
+                self.modal = Some(Modal::Edit(form));
             }
         }
         Outcome::None
@@ -3286,6 +3491,32 @@ impl App {
             view.thread_rx = None;
             view.thread = Some(thread);
         }
+        let mut open_body = None;
+        if let Some(rx) = &view.body_rx
+            && let Ok(read) = rx.try_recv()
+        {
+            view.body_rx = None;
+            match read.body {
+                Ok(body) => {
+                    let dir = view.scratch.join("project-edit");
+                    let path = dir.join(format!("issue-{}-description.md", read.number));
+                    match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, &body)) {
+                        Ok(()) => {
+                            view.body_edit = Some(BodyEdit {
+                                number: read.number,
+                                path: path.clone(),
+                                base: body,
+                            });
+                            open_body = Some(path);
+                        }
+                        Err(e) => {
+                            notice = Some(Notice::error(format!("{}: {e}", path.display())));
+                        }
+                    }
+                }
+                Err(e) => notice = Some(Notice::error(format!("project: {e}"))),
+            }
+        }
         if let Some(rx) = &view.op_rx
             && let Ok(done) = rx.try_recv()
         {
@@ -3310,6 +3541,92 @@ impl App {
         if notice.is_some() {
             self.notice = notice;
         }
+        if let Some(path) = open_body {
+            self.editor_request = Some(super::EditorRequest {
+                path,
+                asset_id: BODY_EDITOR.to_string(),
+                command: crate::assets::editor_command(self.editor.as_deref()),
+            });
+        }
+    }
+
+    /// `Ctrl+O` on the edit form: reads the issue's description from
+    /// GitHub on a thread; the tick writes it to a file and opens the
+    /// operator's editor on it.
+    pub fn project_edit_body(&mut self, number: u64) {
+        let tools = self.project_tools();
+        let Mode::Project(view) = &mut self.mode else {
+            return;
+        };
+        let Some(cfg) = view.cfg.clone() else { return };
+        if view.body_rx.is_some() {
+            self.notice = Some(Notice::info("a description is being read"));
+            return;
+        }
+        let (tx, rx) = channel();
+        view.body_rx = Some(rx);
+        self.notice = Some(Notice::info(format!(
+            "reading the description of #{number} for your editor"
+        )));
+        std::thread::spawn(move || {
+            let body = crate::project::github::issue_detail(&tools, &cfg, number).map(|d| d.body);
+            let _ = tx.send(BodyRead { number, body });
+        });
+    }
+
+    /// The editor closed on a description: a text that changed asks for
+    /// the operator's yes, and nothing is written before it.
+    pub fn project_body_edited(&mut self, path: &Path) {
+        let Mode::Project(view) = &mut self.mode else {
+            let _ = std::fs::remove_file(path);
+            return;
+        };
+        let Some(open) = view.body_edit.take().filter(|b| b.path == path) else {
+            return;
+        };
+        let text = std::fs::read_to_string(path);
+        let _ = std::fs::remove_file(path);
+        let n = open.number;
+        let text = match text {
+            Ok(t) => t,
+            Err(e) => {
+                self.notice = Some(Notice::error(format!("{}: {e}", path.display())));
+                return;
+            }
+        };
+        if text.trim() == open.base.trim() {
+            self.notice = Some(Notice::info(format!(
+                "the description of #{n} was not changed"
+            )));
+            return;
+        }
+        if text.trim().is_empty() {
+            self.notice = Some(Notice::warn(format!(
+                "the description of #{n} was left empty: nothing is written (an issue is emptied on GitHub)"
+            )));
+            return;
+        }
+        let mut lines = vec![format!(
+            "Replace the description of #{n} ({} → {} characters)?",
+            open.base.trim().chars().count(),
+            text.trim().chars().count()
+        )];
+        lines.extend(
+            crate::project::edit::body_warnings(&open.base, &text)
+                .into_iter()
+                .map(|w| format!("! {w}")),
+        );
+        view.modal = Some(Modal::Confirm {
+            lines,
+            op: Op::Edit {
+                number: n,
+                edit: crate::project::edit::Edit {
+                    body: Some(text),
+                    body_base: Some(crate::project::assist::hash(&open.base)),
+                    ..Default::default()
+                },
+            },
+        });
     }
 
     /// Makes a change the operator confirmed, on a thread of its own. The
@@ -3391,6 +3708,9 @@ impl App {
                     of,
                 } => run.triage(action, *number, severity.as_deref(), reason.as_deref(), *of),
                 Op::Advance(moves) => run.apply_moves(moves),
+                Op::Edit { number, edit } => run
+                    .edit_plan(*number, edit)
+                    .and_then(|plan| run.edit_write(&plan)),
                 Op::RunStep { .. } | Op::Process { .. } => {
                     Err("a step is started as its own process".to_string())
                 }
@@ -3445,6 +3765,7 @@ impl App {
             Outcome::OpenUrl(url) => self.open_url(&url),
             Outcome::OpenDoc(path) => self.open_markdown(&path),
             Outcome::LoadThread(n) => self.project_load_thread(n),
+            Outcome::EditBody(n) => self.project_edit_body(n),
             Outcome::LoadTrace(n) => self.project_load_trace(n),
             Outcome::Chat(n) => {
                 if let Err(e) = self.project_chat(n) {
@@ -4362,6 +4683,102 @@ mod tests {
             })
         );
         assert!(v.modal.is_none());
+    }
+
+    #[test]
+    fn the_edit_form_asks_only_for_what_changed() {
+        use crate::project::edit::Edit;
+        let mut v = view();
+        // the Feature: P1, in the milestone v1
+        on_item(&mut v, Screen::Board, 1);
+        assert_eq!(v.handle_key(&key(KeyCode::Char('e'))), Outcome::None);
+        let Some(Modal::Edit(form)) = &v.modal else {
+            panic!("no form: {:?}", v.modal)
+        };
+        assert_eq!(form.title, "Cadastro de Pedidos");
+        assert_eq!(form.priority, 2);
+        assert_eq!(form.milestones, vec!["none", "v1"]);
+        assert_eq!(form.milestone, 1);
+        assert!(v.text_entry_active());
+        // nothing changed: the form stays and says so
+        let Outcome::Notice(said) = v.handle_key(&key(KeyCode::Enter)) else {
+            panic!()
+        };
+        assert!(said.contains("nothing was changed"), "{said}");
+        assert!(matches!(v.modal, Some(Modal::Edit(_))));
+        // letters are the title's, verbs included
+        typed(&mut v, " novo");
+        v.handle_key(&key(KeyCode::Tab));
+        v.handle_key(&key(KeyCode::Left));
+        v.handle_key(&key(KeyCode::Tab));
+        v.handle_key(&key(KeyCode::Left));
+        v.handle_key(&key(KeyCode::Enter));
+        let Some(Modal::Confirm { lines, op }) = &v.modal else {
+            panic!("no confirmation: {:?}", v.modal)
+        };
+        assert_eq!(lines[0], "Change #1:");
+        assert!(lines[1].contains("«Cadastro de Pedidos» → «Cadastro de Pedidos novo»"));
+        assert!(lines[2].contains("priority: P1 → P0"), "{lines:?}");
+        assert!(lines[3].contains("milestone: v1 → none"), "{lines:?}");
+        assert_eq!(
+            op,
+            &Op::Edit {
+                number: 1,
+                edit: Edit {
+                    title: Some("Cadastro de Pedidos novo".into()),
+                    priority: Some(Some("P0".into())),
+                    milestone: Some(None),
+                    body: None,
+                    body_base: None,
+                },
+            }
+        );
+        v.handle_key(&key(KeyCode::Esc));
+
+        // one field changed: only it is asked for
+        on_item(&mut v, Screen::Board, 2);
+        v.handle_key(&key(KeyCode::Char('e')));
+        v.handle_key(&key(KeyCode::Down));
+        v.handle_key(&key(KeyCode::Down));
+        v.handle_key(&key(KeyCode::Right));
+        v.handle_key(&key(KeyCode::Enter));
+        let Some(Modal::Confirm { op, .. }) = &v.modal else {
+            panic!("no confirmation: {:?}", v.modal)
+        };
+        assert_eq!(
+            op,
+            &Op::Edit {
+                number: 2,
+                edit: Edit {
+                    milestone: Some(Some("v1".into())),
+                    ..Default::default()
+                },
+            }
+        );
+        v.handle_key(&key(KeyCode::Esc));
+
+        // an empty title is refused in the form
+        v.handle_key(&key(KeyCode::Char('e')));
+        for _ in 0.."ver pedidos".len() {
+            v.handle_key(&key(KeyCode::Backspace));
+        }
+        assert_eq!(
+            v.handle_key(&key(KeyCode::Enter)),
+            Outcome::Notice("a title is needed".into())
+        );
+        // Ctrl+O leaves the form for the description
+        assert_eq!(
+            v.handle_key(&KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+            Outcome::EditBody(2)
+        );
+        assert!(v.modal.is_none());
+        // with no item under the cursor there is nothing to edit
+        v.screen = Screen::Milestones;
+        v.rebuild();
+        assert_eq!(
+            v.handle_key(&key(KeyCode::Char('e'))),
+            Outcome::Notice("select an item to edit".into())
+        );
     }
 
     #[test]

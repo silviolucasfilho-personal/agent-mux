@@ -42,6 +42,11 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
   agent-mux project triage accept <n> [--severity P]
   agent-mux project triage reject <n> --reason \"…\"
   agent-mux project triage duplicate <n> --of <original>
+  agent-mux project edit <n> [--title \"…\"] [--priority P|none] [--milestone M|none] [--body-file F] [--yes]
+        change an issue's title (its [TYPE] tag stays), priority (the label and the
+        board's field), milestone (by number or title) or description (the whole
+        text of a file; - reads it from the input). Without --yes it reads the issue
+        and says what would change
   agent-mux project advance [--yes]
         the board moves the pull requests already justify; without --yes, only the plan
 
@@ -164,6 +169,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--priority",
     "--area",
     "--body",
+    "--body-file",
     "--status",
     "--reason",
     "--severity",
@@ -438,6 +444,7 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
                 a.value("--of").map(issue_number).transpose()?,
             )
         }),
+        Some("edit") => cmd_edit(&a),
         Some("advance") => cmd_advance(&a),
         Some("merge") => cmd_merge(&a),
         Some("run") => cmd_run(&a).await,
@@ -528,6 +535,56 @@ fn write_cmd(
         eprintln!("the cache was not refreshed ({err}); `agent-mux project sync` reads it again");
     }
     Ok(())
+}
+
+/// `project edit <n>`: the plan from what GitHub has now, and with
+/// `--yes` the writes.
+fn cmd_edit(a: &Args) -> anyhow::Result<()> {
+    use super::edit::Edit;
+    let n = number(a)?;
+    let body = match a.value("--body-file") {
+        None => None,
+        Some("-") => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+            Some(text)
+        }
+        Some(file) => {
+            Some(std::fs::read_to_string(file).map_err(|e| anyhow::anyhow!("{file}: {e}"))?)
+        }
+    };
+    if a.value("--body").is_some() {
+        anyhow::bail!("a description is given as a file: --body-file <file>, or - for the input");
+    }
+    let edit = Edit {
+        title: a.value("--title").map(str::to_string),
+        // a priority's label is upper case; `p1` means it
+        priority: a
+            .value("--priority")
+            .map(|p| Edit::value(p).map(|p| p.to_ascii_uppercase())),
+        milestone: a.value("--milestone").map(Edit::value),
+        body,
+        body_base: None,
+    };
+    let write = a.flag("--yes") && !a.flag("--dry-run");
+    write_cmd(a, |ops, _| {
+        let plan = ops.edit_plan(n, &edit)?;
+        let mut report = ops::Report {
+            lines: plan.text(),
+            touched: Vec::new(),
+        };
+        if plan.is_empty() {
+            return Ok(report);
+        }
+        if !write {
+            report.say("Nothing was written. Run it again with --yes to do it.");
+            return Ok(report);
+        }
+        let done = ops.edit_write(&plan)?;
+        report.lines.extend(done.lines);
+        report.touched = done.touched;
+        Ok(report)
+    })
 }
 
 fn cmd_advance(a: &Args) -> anyhow::Result<()> {
