@@ -2,14 +2,44 @@
 
 A **Project** is a repository configured with spec-wave, opened in agent-mux: its epics, features, stories, tasks and bugs, read from its GitHub issues and its Projects v2 board, each with its stage, its documents, its pull requests and its next step.
 
-Four things are built: reading a Project, the first changes to it (create an item, move a card, repair a stage, triage a Bug, bring the board up to its pull requests), running its document steps (spec, plan, bug document, their critique and validation, and the decomposition into Stories and Tasks), and building one Story or fixing one Bug into a draft pull request. Every change is one you ask for and confirm. agent-mux never writes `.spec-wave.json` and never merges. A Feature built as a stack, QA and the dev-agent fleet are the later phases of the design: `docs/superpowers/specs/2026-11-18-issue-based-project-management-design.md`.
+Four things are built: reading a Project, the first changes to it (create an item, move a card, repair a stage, triage a Bug, bring the board up to its pull requests), running its document steps (spec, plan, bug document, their critique and validation, and the decomposition into Stories and Tasks), and building one Story or fixing one Bug into a draft pull request. Every change is one you ask for and confirm. agent-mux never changes a `.spec-wave.json` (it writes one only when `project init` sets a repository up) and never merges. A Feature built as a stack, QA and the dev-agent fleet are the later phases of the design: `docs/superpowers/specs/2026-11-18-issue-based-project-management-design.md`.
 
 ## 1. What you need
 
-- A folder that has `.spec-wave.json`, or is inside one that does. A code repository (`"role": "code"`) opens the Project of its hub.
+- A folder that has `.spec-wave.json`, or is inside one that does. A code repository (`"role": "code"`) opens the Project of its hub. A repository that never had spec-wave gets one with `agent-mux project init` (below).
 - `gh`, logged in. The board needs the `project` scope on its token: `gh auth refresh --scopes project`. Without it the Project still opens, each stage is derived from the issue's own labels, documents and pull requests, and every screen says so.
 
 None of spec-wave's programs is used: no CLI, no Action, no daemon.
+
+### A repository that never had spec-wave
+
+`agent-mux project init`, run in the repository's folder, makes it a spec-wave repository without spec-wave's CLI:
+
+- **The board:** a GitHub Project titled `<repo> — Spec Wave` (`--title` names another), with the `Etapa` field and its twelve stages, `Work Item Type`, `Priority`, `Story Points`, `Area` and the text field `Release`, linked to the repository.
+- **The labels:** the forty of the flow (types, priorities, triggers, states and Bug origins), with spec-wave's colours and descriptions.
+- **The file:** a new `.spec-wave.json` in the folder, in the shape spec-wave's own `init` writes, with the board's ids as they were read back.
+
+```
+agent-mux project init                      # reads, and says what it would do
+agent-mux project init --yes                # does it
+agent-mux project init --board 7 --yes      # adopt board #7 instead of creating one
+agent-mux project init --role code --hub acme/hub --yes
+```
+
+The repository is the folder's `origin`; `--repo owner/repo` names it where there is none. Without `--yes` the command only reads and prints its plan.
+
+What it never does:
+
+- **Change the file.** A folder that has `.spec-wave.json` is refused before anything is read. The file is written last, so a run that stops leaves none.
+- **Change what exists on GitHub.** A label that is there keeps its colour and description. A board field that is there keeps its options; when an adopted board's `Etapa` lacks a stage, the plan says so and you add it on GitHub.
+- **Create a second board.** When the owner already has a board with the title, the command stops and names it: `--board N` adopts it and adds only the fields it lacks. That is also how a run that stopped after creating the board is finished (the error names the number).
+- **Install workflows.** No GitHub Action is installed, since agent-mux runs the steps. The result is what `spec-wave init --skip-files` makes; `spec-wave update` installs the Actions later if you want them.
+
+`--skip-project` writes a file that names no board, and `--skip-labels` creates none. `--provider` and `--model` fill the file's `ai` block, which only spec-wave's Actions read.
+
+`--role code --hub owner/repo` sets up a code repository of a hub: only the file is written, and the command prints the entry to add to the hub's `repositories`, which you add by hand because the hub's file exists.
+
+A personal account is allowed with a warning: spec-wave's own CLI refuses one, because its GitHub App reaches only an organization's Projects. After the run, group the board's view by `Etapa` on GitHub, commit the file and run `agent-mux project doctor`.
 
 ## 2. The screens
 
@@ -485,6 +515,8 @@ Past Ready the line comes from the board: how many children are done, which pull
 ## 6. Commands
 
 ```
+agent-mux project init [--repo o/r] [--title T] [--board N] [--skip-project] [--skip-labels] [--provider P] [--model M] [--yes]
+agent-mux project init --role code --hub o/r [--repo o/r] [--yes]
 agent-mux project doctor [--json]
 agent-mux project sync
 agent-mux project ls [--type T] [--stage S] [--milestone M] [--all] [--json]
@@ -563,4 +595,4 @@ A read that fails never becomes a fact. A document whose listing failed is `unkn
 - Driving the repository's own Actions by trigger label instead of agent-mux's flows.
 - Editing an item's title, body, milestone or priority from agent-mux.
 - The mouse on the Project screens.
-- A repository with no `.spec-wave.json`.
+- From `project init`: spec-wave's workflow files and issue templates, the scaffold of `tech_context.yml`, registering a code repository in its hub's file, and `update`, `refresh`, `mode` and `uninstall` (use spec-wave's CLI for those).

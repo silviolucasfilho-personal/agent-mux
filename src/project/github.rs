@@ -284,7 +284,7 @@ pub fn issue_nodes(
 }
 
 /// A `gh` failure that means the token may not read Projects v2.
-fn scope_error(err: &str) -> bool {
+pub(crate) fn scope_error(err: &str) -> bool {
     let e = err.to_lowercase();
     e.contains("insufficient_scopes")
         || e.contains("read:project")

@@ -1,6 +1,7 @@
 //! `.spec-wave.json`: a Project's configuration, written by spec-wave's
 //! CLI and only read here. The CLI serializes the file byte for byte for
-//! its own `update`, so agent-mux never writes it.
+//! its own `update`, so agent-mux never changes one: the only write is
+//! `project::init`'s, of a new file in a folder that has none.
 //!
 //! Shapes read on 2026-11-18: a hub (`spec-wave-ui`, CLI 1.7.6) with
 //! `project.fields` and `repositories[]`, and a code repository
@@ -142,7 +143,7 @@ pub fn find(start: &Path) -> Option<PathBuf> {
 pub fn load(start: &Path) -> Result<ProjectConfig, String> {
     let path = find(start).ok_or_else(|| {
         format!(
-            "no {CONFIG_FILE} at or above {}: this folder is not a spec-wave repository",
+            "no {CONFIG_FILE} at or above {}: this folder is not a spec-wave repository (`agent-mux project init` makes it one)",
             start.display()
         )
     })?;
