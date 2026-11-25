@@ -6,7 +6,8 @@
 //! one script: `trace` (`/api/trace/`, `web/trace.js`), `swarm`
 //! (`/api/swarm/`, `web/swarm.js`), `runs` (`/api/runs/`, `web/runs.js`)
 //! `library` (`/api/library/`, `web/library.js`), `usage` (`/api/usage/`,
-//! `web/usage.js`) and `tools` (`/api/tools/`, `web/tools.js`); each exposes
+//! `web/usage.js`), `tools` (`/api/tools/`, `web/tools.js`) and `project`
+//! (`/api/project/`, `web/project.js`); each exposes
 //! `pub fn routes() -> Router<Arc<WebState>>` and `router` merges them.
 //! `GET /api/live` is a Server-Sent Events stream that says when the
 //! store's `trace_changes` feed advances (`live`).
@@ -19,6 +20,7 @@
 //! Guide: `docs/web.md`.
 
 pub mod library;
+pub mod project;
 pub mod runs;
 pub mod swarm;
 pub mod tools;
@@ -185,6 +187,11 @@ pub const ASSETS: &[(&str, &str, &str)] = &[
         "tools.js",
         "text/javascript; charset=utf-8",
         include_str!("../../web/tools.js"),
+    ),
+    (
+        "project.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../web/project.js"),
     ),
 ];
 
@@ -398,6 +405,7 @@ pub fn router(state: Arc<WebState>) -> Router {
         .merge(library::routes())
         .merge(usage::routes())
         .merge(tools::routes())
+        .merge(project::routes())
         .route("/api/live", get(live))
         .route("/api/resolve", get(resolve).post(resolve))
         .route("/api/{*rest}", axum::routing::any(api_not_found))
@@ -559,6 +567,7 @@ mod tests {
             "library.js",
             "usage.js",
             "tools.js",
+            "project.js",
         ] {
             assert!(asset(name).is_some(), "{name} is embedded");
         }
@@ -571,6 +580,7 @@ mod tests {
             "swarm.js",
             "runs.js",
             "library.js",
+            "project.js",
         ]
         .iter()
         .map(|s| {

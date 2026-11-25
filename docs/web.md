@@ -73,11 +73,11 @@ curl -s -X POST localhost:7331/api/trace/get_health
 ## The app
 
 `web/index.html` loads `app.css`, then `app.js`, then `trace.js`, `usage.js`,
-`tools.js`, `swarm.js`, `runs.js` and `library.js`, in that order. `app.js`
+`tools.js`, `swarm.js`, `runs.js`, `library.js` and `project.js`, in that order. `app.js`
 owns the shell; every other script only registers pages.
 
 **Layout.** A sidebar of grouped pages (Overview, Sessions, Usage, Tools,
-Swarms/Runs, Library, Health; an empty group is not drawn), a top bar with
+Swarms/Runs, Projects, Library, Health; an empty group is not drawn), a top bar with
 the page title, the command palette button and `?`, and the page. At phone
 width (≤ 760px) the sidebar folds into a bar with a menu button. The live
 indicator beside the brand is green while `/api/live` is connected.
@@ -104,8 +104,8 @@ with id `overview`, else the first nav page).
 | `path` | `'/sessions'` or `'/sessions/:key'`; one `:name` per segment. |
 | `render(el, params)` | Fills `el` (emptied first); `params` merges the path parameters and the query string. May be async; a thrown error is shown in place. |
 | `nav` | `false` keeps a detail page out of the nav; `navId` names the nav entry it belongs to. |
-| `group` | The nav group (`AgentMux.groups`). Defaults by id (`sessions`/`search` → Sessions, `skills` → Tools, `swarms`/`bus`/`runs`/`inbox` → Swarms/Runs, `library`/`agents` → Library, `health` → Health), else Tools. |
-| `key` | The letter after `g` that jumps to the page (defaults: `o` Overview, `s` Sessions, `f` Search, `u` Usage, `t` Tools, `k` Skills, `w` Swarms, `b` Bus, `r` Runs, `i` Inbox, `l` Library, `a` Agents, `h` Health). |
+| `group` | The nav group (`AgentMux.groups`). Defaults by id (`sessions`/`search` → Sessions, `skills` → Tools, `swarms`/`bus`/`runs`/`inbox` → Swarms/Runs, `projects` → Projects, `library`/`agents` → Library, `health` → Health), else Tools. |
+| `key` | The letter after `g` that jumps to the page (defaults: `o` Overview, `s` Sessions, `f` Search, `u` Usage, `t` Tools, `k` Skills, `w` Swarms, `b` Bus, `r` Runs, `i` Inbox, `p` Projects, `l` Library, `a` Agents, `h` Health). |
 | `live` | `true` re-renders the page when the store changes: quietly (into a detached element swapped in when done, keeping the selected row), debounced, and never while a field has focus or an overlay is open. Overview, Usage and Sessions are live. |
 
 `AgentMux.onLeave(fn)` runs `fn` when the current page is left or
@@ -231,12 +231,14 @@ script registered it) and Usage (`/usage`); see [Usage](#usage). `trace.js`
 registers Sessions (`/sessions`), Session (`/sessions/:key`), Search
 (`/search`), Skills & Agents (`/skills`) and Health (`/health`); `swarm.js`
 Swarms (`/swarms`) and Bus (`/bus`), `runs.js` Runs (`/runs`) and Inbox
-(`/inbox`), `library.js` Library (`/library`) and Agents (`/agents`).
+(`/inbox`), `library.js` Library (`/library`) and Agents (`/agents`),
+`project.js` Projects (`/projects`); see [Projects](#projects).
 `tools.js` is an empty slot for the Tools area.
 
 **Server side.** `web::router(state)` serves `/`, `/static/{*path}`,
 `/api/live` and merges `trace::routes()`, `swarm::routes()`, `runs::routes()`,
-`library::routes()`, `usage::routes()` and `tools::routes()` (each
+`library::routes()`, `usage::routes()`, `tools::routes()` and
+`project::routes()` (each
 `pub fn routes() -> axum::Router<Arc<WebState>>`). `WebState` holds the
 store path (`db`), the library root (`library_root`, `assets::root()`), the
 one `TraceService` (`trace`) every trace call runs through, so cursors stay
@@ -301,6 +303,47 @@ bounds, working/question spans and event marks, Log shows the event log,
 and Messages shows the swarm's messages. A workspace link opens **Bus**
 (`#/bus?workspace=<path>`), whose workspace form loads peers, tasks and
 messages. These pages have no write controls.
+
+## Projects
+
+A Project is a repository configured with spec-wave, read from its GitHub
+issues and board (`docs/project.md`). These routes answer from what this
+machine **last read** of it: the snapshot cached in the trace store, the
+fleet's dispatches and the sessions the Project's steps started. No route
+calls `gh`, so a page never waits on GitHub and never shows more than the
+last read; `agent-mux project sync` (or opening the Project in the TUI)
+reads it again. They accept **GET** query parameters (and POST aliases for
+the shared SPA client) and do not use the trace envelope.
+
+| Route | Answer |
+|---|---|
+| `GET /api/project/list` | `projects`: every hub that was read, each with `hub`, `synced_ns`, `default_branch`, `root`, the count of `open` items, of items that wait on a person (`needs_you`) and of open `milestones`, `board_error` and the count of `warnings`. |
+| `GET /api/project/board?hub=<owner/repo>&all=1` | The Project: `stages` (the canonical order, then any other stage an item is at), `items` (open ones; `all=1` adds the closed ones the cache keeps), `milestones` with each Feature's stage and where its four documents are, `fleet` (the dispatches), `totals` (by issue number: what the item's own sessions add up to, and with what is under it), `warnings` and `board_error`. |
+| `GET /api/project/item?hub=<owner/repo>&n=<number>` | One item: `item` (every field, with `shown_stage` and `next`), `card` (the lines `project show` prints), `ancestors` from the top down, `children` as rows, `order` for a Feature or an RFC (`rows`, `cycle`, `external`, `warnings`, `lines`), `dispatch`, `totals` and `sessions_line`, and its trace: `report`, `runs` (sessions grouped by workflow run) and `tree_lines`. |
+| `GET /api/project/activity?hub=<owner/repo>` | `sessions` (how many the Project's steps started) and the Observability screen's lines for the last 30 days (`recent`) and `ever`. |
+
+A row of `items` or `children` has `number`, `type`, `title` (without its
+`[TYPE]` prefix), `open`, `stage`, `stage_derived` (the issue is not on
+the board), `priority`, `milestone`, `parent`, `assignees`, `repos`,
+`updated`, `pulls`, `next` (`action`, `reason`, `runnable`, `blocked`),
+`next_line` and `needs_operator`.
+
+`hub` matches whatever its case. A hub that was never read is JSON 404
+with the command that reads it; a missing `hub` or `n`, or an unknown
+query key, is JSON 400; an issue that is not in the snapshot is JSON 404.
+
+**Projects** (`#/projects`, `g p`) lists the hubs. A hub opens **Project**
+(`#/projects/<owner>/<repo>`): four counts, when it was read, what could
+not be read, and five views kept in the `view` query key: Board (the open
+items under their stage, narrowed by type with `type`), Needs you (the
+Features, Bugs and RFCs that wait on a person), Milestones (each open
+milestone's Features and documents), Fleet (the dispatches) and Activity.
+An item opens **Item** (`#/projects/<owner>/<repo>/items/<n>`): the path
+down to it, its stage and next step, a link to the issue on GitHub, and
+the views Card, Children, Order (a Feature or an RFC), Documents, Pull
+requests and Trace, where a session opens the session viewer and a run
+opens its workflow run. These pages have no write controls: nothing is
+moved, started or merged from the web.
 
 ## Runs: loops and workflows
 
