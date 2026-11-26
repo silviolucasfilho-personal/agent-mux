@@ -21,7 +21,9 @@ use crate::project::contract::*;
 use crate::project::doctor::{self, Check};
 use crate::project::next::{self, Decision};
 use crate::project::{Item, ItemType, Snapshot, build, cli, ops, order, snapshot, stage, store};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::{Position, Rect};
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
@@ -211,6 +213,56 @@ pub enum Outcome {
     EditBody(u64),
 }
 
+/// Where the last frame put each part of the screen, for the mouse.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Drawn {
+    /// The list of screens, inside its border, and the first one drawn.
+    pub nav: Rect,
+    pub nav_start: usize,
+    /// The rows of the selected screen, inside their border.
+    pub list: Rect,
+    /// The first line the list drew, and how many lines come before the
+    /// first row (the line that says the filter).
+    pub list_start: usize,
+    pub list_lead: usize,
+    /// The line of tabs of the right side.
+    pub tabs: Rect,
+    /// What is under the tabs, and how far it scrolls.
+    pub content: Rect,
+    pub max_scroll: u16,
+    /// The line of the content that is the first row of the tab's list,
+    /// when the tab is one (the item screen's Documents, Children, Pull
+    /// requests and Trace).
+    pub rows_at: Option<u16>,
+}
+
+/// The tab a column of the line of tabs is on. The line is drawn as one
+/// space, then each tab as ` <n> <name> ` with one space after it.
+pub fn tab_at(tabs: &[&str], column: u16) -> Option<usize> {
+    let mut x = 1u16;
+    for (i, t) in tabs.iter().enumerate() {
+        let width = format!(" {} {t} ", i + 1).chars().count() as u16;
+        if (x..x + width).contains(&column) {
+            return Some(i);
+        }
+        x += width + 1;
+    }
+    None
+}
+
+/// Opens a tab of the item screen. The Thread and Trace tabs are read
+/// when they open.
+fn set_item_tab(screen: &mut ItemScreen, to: usize) -> Option<Outcome> {
+    screen.tab = to;
+    screen.cursor = 0;
+    screen.scroll = 0;
+    match to {
+        TAB_THREAD => Some(Outcome::LoadThread(screen.number)),
+        TAB_TRACE => Some(Outcome::LoadTrace(screen.number)),
+        _ => None,
+    }
+}
+
 #[derive(Debug)]
 pub struct ProjectView {
     /// The folder the screen was opened on.
@@ -272,6 +324,7 @@ pub struct ProjectView {
     body_rx: Option<Receiver<BodyRead>>,
     /// The description that is open in the editor.
     pub body_edit: Option<BodyEdit>,
+    pub drawn: Cell<Drawn>,
 }
 
 /// An issue's description, read for the editor.
@@ -346,6 +399,7 @@ impl ProjectView {
             thread_rx: None,
             body_rx: None,
             body_edit: None,
+            drawn: Cell::default(),
         }
     }
 
@@ -721,6 +775,118 @@ impl ProjectView {
         Outcome::None
     }
 
+    /// The mouse (spec §41): a click chooses a screen, a row or a tab, a
+    /// click on the row that is already chosen is `Enter`, and the wheel
+    /// moves what it is over. A dialog takes no click: what it asks is
+    /// answered on the keyboard.
+    pub fn handle_mouse(&mut self, ev: &MouseEvent) -> Outcome {
+        if self.modal.is_some() {
+            return Outcome::None;
+        }
+        let d = self.drawn.get();
+        let at = Position::new(ev.column, ev.row);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        match ev.kind {
+            MouseEventKind::Down(MouseButton::Left) if d.nav.contains(at) => {
+                let to = d.nav_start + usize::from(ev.row - d.nav.y);
+                if let Some(screen) = Screen::ALL.get(to) {
+                    self.filtering = false;
+                    self.item = None;
+                    self.focus = Focus::Nav;
+                    if *screen != self.screen {
+                        self.set_screen(*screen);
+                    }
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) if d.list.contains(at) => {
+                let line = d.list_start + usize::from(ev.row - d.list.y);
+                let Some(to) = line
+                    .checked_sub(d.list_lead)
+                    .filter(|i| *i < self.rows.len())
+                else {
+                    return Outcome::None;
+                };
+                self.filtering = false;
+                self.focus = Focus::List;
+                // a click on a row closes the item screen over the list
+                let again = self.item.take().is_none() && to == self.cursor();
+                self.set_cursor(to);
+                self.scroll = 0;
+                if again || matches!(self.rows[to], Row::Heading { .. }) {
+                    return self.handle_key(&enter);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) if d.tabs.contains(at) => {
+                let column = ev.column - d.tabs.x;
+                if let Some(screen) = self.item.as_mut() {
+                    if let Some(to) = tab_at(&ITEM_TABS, column)
+                        && to != screen.tab
+                        && let Some(load) = set_item_tab(screen, to)
+                    {
+                        return load;
+                    }
+                } else if let Some(to) = tab_at(self.screen.tabs(), column) {
+                    self.tab = to;
+                    self.scroll = 0;
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) if d.content.contains(at) => {
+                let len = self.item_tab_len();
+                let (Some(first), Some(screen)) = (d.rows_at, self.item.as_mut()) else {
+                    return Outcome::None;
+                };
+                let Some(to) = (ev.row - d.content.y)
+                    .checked_sub(first)
+                    .map(usize::from)
+                    .filter(|i| *i < len)
+                else {
+                    return Outcome::None;
+                };
+                let again = to == screen.cursor;
+                screen.cursor = to;
+                if again {
+                    return self.item_key(&enter);
+                }
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let up = matches!(ev.kind, MouseEventKind::ScrollUp);
+                let by: isize = if up { -1 } else { 1 };
+                let scrolled = |from: u16| {
+                    if up {
+                        from.saturating_sub(3)
+                    } else {
+                        from.saturating_add(3).min(d.max_scroll)
+                    }
+                };
+                if d.content.contains(at) || d.tabs.contains(at) {
+                    let len = self.item_tab_len();
+                    match self.item.as_mut() {
+                        Some(screen) if d.rows_at.is_some() => {
+                            screen.cursor = (screen.cursor as isize + by)
+                                .clamp(0, len.saturating_sub(1) as isize)
+                                as usize;
+                        }
+                        Some(screen) => screen.scroll = scrolled(screen.scroll),
+                        None => self.scroll = scrolled(self.scroll),
+                    }
+                } else if self.item.is_some() {
+                    // the lists stay where they are under an open item
+                } else if d.list.contains(at) {
+                    self.step(by);
+                } else if d.nav.contains(at) {
+                    let to = (self.screen.index() as isize + by)
+                        .clamp(0, Screen::ALL.len() as isize - 1)
+                        as usize;
+                    if Screen::ALL[to] != self.screen {
+                        self.set_screen(Screen::ALL[to]);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Outcome::None
+    }
+
     fn item_key(&mut self, key: &KeyEvent) -> Outcome {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let len = self.item_tab_len();
@@ -739,17 +905,6 @@ impl ProjectView {
             return Outcome::None;
         };
         let lists = matches!(screen.tab, 1..=3) || screen.tab == TAB_TRACE;
-        // the Thread and Trace tabs are read when they open
-        fn set_tab(screen: &mut ItemScreen, to: usize) -> Option<Outcome> {
-            screen.tab = to;
-            screen.cursor = 0;
-            screen.scroll = 0;
-            match to {
-                TAB_THREAD => Some(Outcome::LoadThread(screen.number)),
-                TAB_TRACE => Some(Outcome::LoadTrace(screen.number)),
-                _ => None,
-            }
-        }
         match key.code {
             KeyCode::Char('r') if ctrl => return Outcome::Sync,
             KeyCode::Char('d') if ctrl => screen.scroll = screen.scroll.saturating_add(10),
@@ -767,18 +922,18 @@ impl ProjectView {
             },
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
                 let to = (screen.tab + 1) % ITEM_TABS.len();
-                if let Some(load) = set_tab(screen, to) {
+                if let Some(load) = set_item_tab(screen, to) {
                     return load;
                 }
             }
             KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
                 let to = (screen.tab + ITEM_TABS.len() - 1) % ITEM_TABS.len();
-                if let Some(load) = set_tab(screen, to) {
+                if let Some(load) = set_item_tab(screen, to) {
                     return load;
                 }
             }
             KeyCode::Char(c @ '1'..='6') => {
-                if let Some(load) = set_tab(screen, c as usize - '1' as usize) {
+                if let Some(load) = set_item_tab(screen, c as usize - '1' as usize) {
                     return load;
                 }
             }
@@ -3741,7 +3896,25 @@ impl App {
         let Mode::Project(view) = &mut self.mode else {
             return;
         };
-        match view.handle_key(key) {
+        let outcome = view.handle_key(key);
+        self.project_outcome(outcome);
+    }
+
+    /// The mouse on the Project screens: what `ProjectView::handle_mouse`
+    /// answers is acted on as a key's outcome is.
+    pub fn project_mouse(&mut self, ev: &MouseEvent) {
+        let Mode::Project(view) = &mut self.mode else {
+            return;
+        };
+        let outcome = view.handle_mouse(ev);
+        self.project_outcome(outcome);
+    }
+
+    fn project_outcome(&mut self, outcome: Outcome) {
+        let Mode::Project(view) = &mut self.mode else {
+            return;
+        };
+        match outcome {
             Outcome::None => {}
             Outcome::Close => self.mode = Mode::Main,
             Outcome::Sync => {

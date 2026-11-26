@@ -96,6 +96,8 @@ The left column holds the screens and, under them, the selected screen's rows. T
 
 The **Trace** tab lists the runs of the item's steps, newest last, each with its sessions, tokens, cost and time; a Feature's tab includes the runs of its Stories and their Tasks. Under the list are the sessions of the selected run (work, review or critique, with the harness, turns and tools). `Enter` opens the run on the Run screen, and `Esc` there returns to the tab. It is read from the trace store each time the tab opens and on `Ctrl+R`; nothing is asked of GitHub.
 
+**The mouse.** A click chooses a screen, a row or a tab. A click on the row that is already chosen opens it, as `Enter` does, and a click on a heading folds it. On the item screen a click on a document, a child, a pull request or a run chooses it and a second click opens it; a click on a row at the left closes the item screen. The wheel moves what it is over: the screens, the rows, the pane's text or the item screen's list. A dialog takes no click: a form and a confirmation are answered on the keyboard.
+
 A `!` at the right of a row means the item waits on you. A `~` beside a stage means it was derived, because the issue is not on the board.
 
 ## 3. Changing a Project
@@ -614,5 +616,5 @@ A read that fails never becomes a fact. A document whose listing failed is `unkn
 - Recording a Tech Leader's decision on a finding (`risk-accepted`).
 - Driving the repository's own Actions by trigger label instead of agent-mux's flows.
 - In an edit: an item's type, assignees, area and other labels, creating a milestone, and the `Prioridade` line of a description, which stays as it was written when the priority changes.
-- The mouse on the Project screens.
+- With the mouse: a dialog (forms, pickers and confirmations take only keys), and the keys in the footer.
 - From `project init`: spec-wave's workflow files and issue templates, the scaffold of `tech_context.yml`, registering a code repository in its hub's file, and `update`, `refresh`, `mode` and `uninstall` (use spec-wave's CLI for those).

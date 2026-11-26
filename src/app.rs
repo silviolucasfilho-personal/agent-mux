@@ -6230,6 +6230,10 @@ impl App {
             self.swarm_mouse(ev);
             return;
         }
+        if matches!(self.mode, Mode::Project(_)) {
+            self.project_mouse(&ev);
+            return;
+        }
         if let Mode::Markdown(ref mut view) = self.mode {
             let outcome = view.handle_mouse(&ev);
             self.markdown_outcome(outcome);
