@@ -1255,6 +1255,7 @@ mod tests {
             tokens: Some(100),
             cost_usd: Some(0.5),
             unpriced: false,
+            models: Vec::new(),
         };
         let r = ProjectReport {
             hub: "Acme/Hub".into(),

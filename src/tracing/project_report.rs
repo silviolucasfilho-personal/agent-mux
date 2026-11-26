@@ -30,6 +30,42 @@ pub struct StepLaunch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
     pub unpriced: bool,
+    /// What each model the session called used.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelUse>,
+}
+
+/// What one model did in one session: its generations added up.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ModelUse {
+    pub model: String,
+    pub tokens: i64,
+    pub cost_usd: f64,
+    /// A generation had usage and no price: `cost_usd` is a floor.
+    pub unpriced: bool,
+}
+
+/// The models of a launch, by name. A generation with no model recorded
+/// is under `(model not recorded)`.
+fn models(conn: &Connection, launch_id: &str) -> rusqlite::Result<Vec<ModelUse>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT COALESCE(NULLIF(o.model, ''), '(model not recorded)') AS model,
+                COALESCE(SUM(o.total_tokens), 0),
+                COALESCE(SUM(o.total_cost_usd), 0.0),
+                COALESCE(SUM(o.usage IS NOT NULL AND o.total_cost_usd IS NULL), 0)
+         FROM observations o JOIN traces t ON t.id = o.trace_id
+         WHERE t.launch_id = ?1 AND o.type = 'generation'
+         GROUP BY 1 ORDER BY 1",
+    )?;
+    let rows = stmt.query_map([launch_id], |r| {
+        Ok(ModelUse {
+            model: r.get(0)?,
+            tokens: r.get(1)?,
+            cost_usd: r.get(2)?,
+            unpriced: r.get::<_, i64>(3)? > 0,
+        })
+    })?;
+    rows.collect()
 }
 
 /// An item the report covers, named from the Project's cache when it is
@@ -172,7 +208,6 @@ fn read_launches(
         let tokens: i64 = turns.iter().filter_map(|t| t.tokens).sum();
         let cost: f64 = turns.iter().filter_map(|t| t.cost_usd).sum();
         out.push(StepLaunch {
-            launch_id,
             project,
             provider,
             session_key,
@@ -183,7 +218,9 @@ fn read_launches(
             tokens: (tokens > 0).then_some(tokens),
             cost_usd: (cost > 0.0).then_some(cost),
             unpriced: turns.iter().any(|t| t.unpriced),
+            models: models(conn, &launch_id)?,
             turns,
+            launch_id,
         });
     }
     Ok(out)
@@ -248,7 +285,6 @@ impl Totals {
 
     /// `3 session(s) · 12.4k tok · $0.42 · 18m`.
     pub fn line(&self) -> String {
-        let mins = self.wall_ns / 60_000_000_000;
         format!(
             "{} session(s) · {} tok · {} · {}",
             self.sessions,
@@ -257,13 +293,229 @@ impl Totals {
                 (self.cost_usd > 0.0).then_some(self.cost_usd),
                 self.unpriced
             ),
-            if mins >= 90 {
-                format!("{}h{:02}m", mins / 60, mins % 60)
-            } else {
-                format!("{mins}m")
-            }
+            minutes(self.wall_ns)
         )
     }
+}
+
+/// `18m`, and `2h05m` from an hour and a half on.
+fn minutes(ns: i64) -> String {
+    let mins = ns.max(0) / 60_000_000_000;
+    if mins >= 90 {
+        format!("{}h{:02}m", mins / 60, mins % 60)
+    } else {
+        format!("{mins}m")
+    }
+}
+
+/// The document a critique session audited (`critique:<kind>`). Sessions
+/// from before the step carried it have none.
+fn critique_document(step: &str) -> Option<&str> {
+    let rest = step.strip_prefix("critique")?;
+    match rest.strip_prefix(':') {
+        Some(kind) if !kind.is_empty() => Some(kind),
+        Some(_) => Some("(document not recorded)"),
+        None if rest.is_empty() => Some("(document not recorded)"),
+        None => None,
+    }
+}
+
+/// The cost by model: a session that called two models counts under
+/// each, with the tokens and the cost of that model alone.
+fn model_lines(launches: &[StepLaunch]) -> Vec<String> {
+    struct Row {
+        model: String,
+        sessions: usize,
+        tokens: i64,
+        cost: f64,
+        unpriced: bool,
+    }
+    let mut rows: Vec<Row> = Vec::new();
+    for l in launches {
+        for m in &l.models {
+            let at = match rows.iter().position(|r| r.model == m.model) {
+                Some(at) => at,
+                None => {
+                    rows.push(Row {
+                        model: m.model.clone(),
+                        sessions: 0,
+                        tokens: 0,
+                        cost: 0.0,
+                        unpriced: false,
+                    });
+                    rows.len() - 1
+                }
+            };
+            let r = &mut rows[at];
+            r.sessions += 1;
+            r.tokens += m.tokens;
+            r.cost += m.cost_usd;
+            r.unpriced |= m.unpriced;
+        }
+    }
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    rows.sort_by(|a, b| {
+        b.cost
+            .partial_cmp(&a.cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.tokens.cmp(&a.tokens))
+            .then(a.model.cmp(&b.model))
+    });
+    let mut out = vec![String::new(), "By model".to_string()];
+    for r in rows.iter().take(12) {
+        let name: String = r.model.chars().take(28).collect();
+        out.push(format!(
+            "  {name:<28} {} session(s) · {} tok · {}",
+            r.sessions,
+            fmt_tokens((r.tokens > 0).then_some(r.tokens)),
+            cost_label((r.cost > 0.0).then_some(r.cost), r.unpriced)
+        ));
+    }
+    out
+}
+
+/// The critiques by the document they audited, and the documents that
+/// took more than one attempt. An attempt is the session's own number,
+/// which is counted from the issue's comments.
+fn critique_lines(launches: &[StepLaunch], now_ns: i64) -> Vec<String> {
+    // (document, item) → sessions and the highest attempt
+    /// A kind of document: its name, its critiques added up, and the
+    /// highest attempt of each item audited.
+    type Doc = (String, Totals, Vec<(u64, u32)>);
+    let mut docs: Vec<Doc> = Vec::new();
+    for l in launches {
+        let Some(doc) = critique_document(&l.project.step) else {
+            continue;
+        };
+        let at = match docs.iter().position(|d| d.0 == doc) {
+            Some(at) => at,
+            None => {
+                docs.push((doc.to_string(), Totals::default(), Vec::new()));
+                docs.len() - 1
+            }
+        };
+        let (_, totals, items) = &mut docs[at];
+        totals.add(l, now_ns);
+        match items.iter_mut().find(|(n, _)| *n == l.project.item) {
+            Some((_, attempt)) => *attempt = (*attempt).max(l.project.attempt),
+            None => items.push((l.project.item, l.project.attempt)),
+        }
+    }
+    if docs.is_empty() {
+        return Vec::new();
+    }
+    docs.sort_by(|a, b| b.1.sessions.cmp(&a.1.sessions).then(a.0.cmp(&b.0)));
+    let mut out = vec![String::new(), "Critiques by document".to_string()];
+    let mut again: Vec<(u32, u64, &str)> = Vec::new();
+    for (doc, totals, items) in &docs {
+        let highest = items.iter().map(|(_, a)| *a).max().unwrap_or(1);
+        out.push(format!(
+            "  {doc:<28} {} critique(s) of {} document(s) · highest attempt {highest} · {} tok · {}",
+            totals.sessions,
+            items.len(),
+            fmt_tokens((totals.tokens > 0).then_some(totals.tokens)),
+            cost_label(
+                (totals.cost_usd > 0.0).then_some(totals.cost_usd),
+                totals.unpriced
+            ),
+        ));
+        again.extend(
+            items
+                .iter()
+                .filter(|(_, a)| *a > 1)
+                .map(|(n, a)| (*a, *n, doc.as_str())),
+        );
+    }
+    if !again.is_empty() {
+        again.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(b.2)));
+        out.push(format!(
+            "  audited more than once ({}): {}",
+            again.len(),
+            again
+                .iter()
+                .take(8)
+                .map(|(a, n, doc)| format!("#{n} {doc} ×{a}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    out
+}
+
+/// From Ready to Review, as far as the sessions say it: for each item
+/// the board shows in code review or later (or closed), the time from
+/// the first session of its build or fix to the last. The time an item
+/// waited in Ready before a build started is not known here.
+fn build_time_lines(launches: &[StepLaunch], snap: Option<&Snapshot>) -> Vec<String> {
+    use crate::project::contract::{STAGE_CODE_REVIEW, STAGE_ORDER};
+    let Some(snap) = snap else {
+        return Vec::new();
+    };
+    let review = STAGE_ORDER.iter().position(|s| *s == STAGE_CODE_REVIEW);
+    // item → first start, last end, sessions; `None` end: one is going
+    let mut by: Vec<(u64, i64, Option<i64>, usize)> = Vec::new();
+    for l in launches {
+        if !matches!(l.project.step.as_str(), "build" | "fix") {
+            continue;
+        }
+        match by.iter_mut().find(|b| b.0 == l.project.item) {
+            Some(b) => {
+                b.1 = b.1.min(l.started_ns);
+                b.2 = match (b.2, l.ended_ns) {
+                    (Some(a), Some(e)) => Some(a.max(e)),
+                    _ => None,
+                };
+                b.3 += 1;
+            }
+            None => by.push((l.project.item, l.started_ns, l.ended_ns, 1)),
+        }
+    }
+    let mut done: Vec<(i64, u64, usize)> = by
+        .into_iter()
+        .filter_map(|(n, start, end, sessions)| {
+            let item = snap.item(n)?;
+            let at = STAGE_ORDER
+                .iter()
+                .position(|s| *s == crate::project::stage::shown(item).stage);
+            let reached = !item.open || (at.is_some() && at >= review);
+            reached.then_some(((end? - start).max(0), n, sessions))
+        })
+        .collect();
+    if done.is_empty() {
+        return Vec::new();
+    }
+    done.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut spans: Vec<i64> = done.iter().map(|d| d.0).collect();
+    spans.sort_unstable();
+    let median = spans[spans.len() / 2];
+    let mean = spans.iter().sum::<i64>() / spans.len() as i64;
+    let mut out = vec![
+        String::new(),
+        format!(
+            "Ready to Review ({} item(s): a build's first session to its last)",
+            done.len()
+        ),
+        format!(
+            "  median {} · mean {} · longest {}",
+            minutes(median),
+            minutes(mean),
+            minutes(done[0].0)
+        ),
+    ];
+    for (span, n, sessions) in done.iter().take(5) {
+        let title = snap
+            .item(*n)
+            .map(|i| crate::project::contract::strip_tag(&i.title).to_string())
+            .unwrap_or_default();
+        let name: String = format!("#{n} {title}").chars().take(28).collect();
+        out.push(format!(
+            "  {name:<28} {} · {sessions} session(s)",
+            minutes(*span)
+        ));
+    }
+    out
 }
 
 /// An item's own sessions and the ones of everything under it.
@@ -352,7 +604,7 @@ pub fn observability_lines(
             span(l.started_ns, None, now_ns)
         ));
     }
-    let mut group = |title: &str, key: &dyn Fn(&StepLaunch) -> String| {
+    let group = |out: &mut Vec<String>, title: &str, key: &dyn Fn(&StepLaunch) -> String| {
         let mut by: Vec<(String, Totals)> = Vec::new();
         for l in launches {
             let k = key(l);
@@ -378,25 +630,26 @@ pub fn observability_lines(
             out.push(format!("  {name:<28} {}", t.line()));
         }
     };
-    group("By step", &|l| {
+    group(&mut out, "By step", &|l| {
         // `agent:<name>` and `insights:<scope>` are one kind each
         l.project.step.split(':').next().unwrap_or("").to_string()
     });
-    group("By harness", &|l| l.provider.clone());
-    group("By milestone", &|l| {
+    group(&mut out, "By harness", &|l| l.provider.clone());
+    out.extend(model_lines(launches));
+    group(&mut out, "By milestone", &|l| {
         l.project
             .milestone
             .clone()
             .unwrap_or_else(|| "(no milestone)".into())
     });
-    group("By executor", &|l| {
+    group(&mut out, "By executor", &|l| {
         if l.project.executor.is_empty() {
             "(unknown)".to_string()
         } else {
             l.project.executor.clone()
         }
     });
-    group("By item (the 12 that cost most)", &|l| {
+    group(&mut out, "By item (the 12 that cost most)", &|l| {
         if l.project.item == 0 {
             return "the whole Project".to_string();
         }
@@ -407,6 +660,8 @@ pub fn observability_lines(
         let name = format!("#{} {title}", l.project.item);
         name.chars().take(28).collect()
     });
+    out.extend(critique_lines(launches, now_ns));
+    out.extend(build_time_lines(launches, snap));
     let failed: Vec<&StepLaunch> = launches.iter().filter(|l| l.errors > 0).collect();
     if !failed.is_empty() {
         out.push(String::new());
@@ -804,6 +1059,229 @@ pub(crate) mod tests {
             ],
             ..Default::default()
         }
+    }
+
+    fn generation(id: &str, trace: &str, model: Option<&str>, tokens: i64) -> StoreOp {
+        use crate::tracing::store::model::{Level, ObservationRow, ObservationType};
+        use crate::tracing::usage::NormalizedUsage;
+        StoreOp::Observation(ObservationRow {
+            id: id.into(),
+            trace_id: trace.into(),
+            parent_id: None,
+            obs_type: ObservationType::Generation,
+            name: "assistant".into(),
+            kind: None,
+            start_ns: 1_100,
+            end_ns: Some(1_200),
+            level: Level::Default,
+            status_message: None,
+            model: model.map(str::to_string),
+            input: None,
+            output: Some("ok".into()),
+            thinking: None,
+            usage_raw: Some(vec![("input_tokens".into(), tokens)]),
+            usage: Some(NormalizedUsage {
+                input: Some(tokens),
+                total: Some(tokens),
+                ..Default::default()
+            }),
+            tool_id: None,
+            tool_name: None,
+            skill: None,
+            mcp_server: None,
+            path: None,
+            ts_approx: false,
+            metadata: serde_json::Map::new(),
+        })
+    }
+
+    #[test]
+    fn a_sessions_models_are_read_from_its_generations() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("traces.db");
+        let mut store =
+            crate::tracing::store::open_rw(&db, crate::tracing::store::OpenOptions::default())
+                .unwrap();
+        let t0 = 1_700_000_000_000_000_000i64;
+        for op in [
+            StoreOp::Launch(launch_row(
+                "L-build",
+                t0,
+                Some(&tag(12, "build", "run-2", "build")),
+            )),
+            StoreOp::Launch(launch_row(
+                "L-idle",
+                t0 + 1,
+                Some(&tag(12, "build", "run-3", "build")),
+            )),
+            StoreOp::Trace(turn("T-1", "L-build", t0 + 1_000_000_000)),
+            StoreOp::Trace(turn("T-2", "L-build", t0 + 2_000_000_000)),
+            generation("G-1", "T-1", Some("claude-sonnet-4-5-20250929"), 1_000_000),
+            generation("G-2", "T-2", Some("claude-sonnet-4-5-20250929"), 500_000),
+            generation("G-3", "T-2", Some("a-model-with-no-price"), 2_000),
+            generation("G-4", "T-2", None, 10),
+        ] {
+            assert_eq!(store.apply(&[op]).unwrap(), 0, "the store refused an op");
+        }
+        let conn = crate::tracing::store::open_aux(&db).unwrap();
+        let all = hub_launches(&conn, "acme/hub", 0).unwrap();
+        assert_eq!(all.len(), 2);
+        let m = &all[0].models;
+        let names: Vec<&str> = m.iter().map(|m| m.model.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "(model not recorded)",
+                "a-model-with-no-price",
+                "claude-sonnet-4-5-20250929"
+            ]
+        );
+        assert_eq!(m[2].tokens, 1_500_000);
+        // priced or not is the price table's: the sum is the generations'
+        assert!(m[2].cost_usd > 0.0 || m[2].unpriced, "{:?}", m[2]);
+        assert_eq!((m[1].tokens, m[1].cost_usd), (2_000, 0.0));
+        assert!(m[1].unpriced, "{:?}", m[1]);
+        // a session with no generation has none, and is in no model's row
+        assert!(all[1].models.is_empty());
+        let obs = observability_lines(&all, None, "ever", t0).join("\n");
+        let at = obs.find("By model\n  claude-sonnet-4-5-20250929   1 session(s) · ");
+        assert!(at.is_some(), "{obs}");
+        assert!(
+            obs.contains("\n  a-model-with-no-price        1 session(s) · 2.0k tok"),
+            "{obs}"
+        );
+        // the report says so in its JSON, and leaves the key out when empty
+        let json = serde_json::to_value(&all).unwrap();
+        assert_eq!(json[0]["models"][2]["model"], "claude-sonnet-4-5-20250929");
+        assert!(json[1].get("models").is_none());
+    }
+
+    /// A session of a step, as the report holds it.
+    fn session(
+        item: u64,
+        step: &str,
+        attempt: u32,
+        start_min: i64,
+        end_min: Option<i64>,
+    ) -> StepLaunch {
+        let min = 60_000_000_000i64;
+        StepLaunch {
+            launch_id: format!("L-{item}-{step}-{attempt}-{start_min}"),
+            project: ProjectLaunch {
+                attempt,
+                ..tag(item, step, "run", "work")
+            },
+            provider: "claude".into(),
+            session_key: None,
+            started_ns: start_min * min,
+            ended_ns: end_min.map(|m| m * min),
+            turns: Vec::new(),
+            tools: 0,
+            errors: 0,
+            tokens: Some(1_000),
+            cost_usd: Some(0.25),
+            unpriced: false,
+            models: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn critiques_are_counted_by_the_document_they_audited() {
+        assert_eq!(critique_document("critique:spec"), Some("spec"));
+        assert_eq!(
+            critique_document("critique"),
+            Some("(document not recorded)")
+        );
+        assert_eq!(
+            critique_document("critique:"),
+            Some("(document not recorded)")
+        );
+        assert_eq!(critique_document("critiques"), None);
+        assert_eq!(critique_document("spec"), None);
+
+        let launches = vec![
+            session(3, "spec", 1, 0, Some(5)),
+            session(3, "critique:spec", 1, 5, Some(7)),
+            session(3, "critique:spec", 2, 20, Some(22)),
+            session(3, "critique:spec", 3, 40, Some(42)),
+            session(7, "critique:spec", 1, 50, Some(52)),
+            session(3, "critique:plan", 2, 60, Some(62)),
+            session(9, "critique", 1, 70, Some(72)),
+        ];
+        let lines = critique_lines(&launches, 0);
+        assert_eq!(lines[1], "Critiques by document");
+        assert!(
+            lines[2].starts_with(
+                "  spec                         4 critique(s) of 2 document(s) · highest attempt 3 · 4.0k tok · "
+            ),
+            "{lines:#?}"
+        );
+        assert!(
+            lines[3].starts_with("  (document not recorded)      1 critique(s) of 1 document(s)"),
+            "{lines:#?}"
+        );
+        assert!(
+            lines[4].starts_with(
+                "  plan                         1 critique(s) of 1 document(s) · highest attempt 2"
+            ),
+            "{lines:#?}"
+        );
+        assert_eq!(
+            lines[5],
+            "  audited more than once (2): #3 spec ×3, #3 plan ×2"
+        );
+        // no critique, no section; the step's own grouping keeps one row
+        assert!(critique_lines(&launches[..1], 0).is_empty());
+        let obs = observability_lines(&launches, None, "ever", 0).join("\n");
+        assert!(obs.contains("By step\n  critique "), "{obs}");
+        assert!(!obs.contains("  critique:spec"), "{obs}");
+    }
+
+    #[test]
+    fn ready_to_review_is_a_builds_first_session_to_its_last() {
+        use crate::project::contract::{STAGE_CODE_REVIEW, STAGE_DEVELOPMENT, STAGE_QA};
+        let mut snap = snapshot();
+        let mut at = |n: u64, stage: &str| {
+            snap.items.iter_mut().find(|i| i.number == n).unwrap().stage = Some(stage.into());
+        };
+        at(12, STAGE_CODE_REVIEW);
+        at(13, STAGE_DEVELOPMENT);
+        at(15, STAGE_QA);
+        let launches = vec![
+            // #12: work, review, a second round: 0 to 130 minutes
+            session(12, "build", 1, 0, Some(30)),
+            session(12, "build", 1, 30, Some(40)),
+            session(12, "build", 1, 100, Some(130)),
+            // a review fix afterwards is not the build
+            session(12, "fix-pr", 1, 500, Some(520)),
+            // #15: 20 minutes
+            session(15, "fix", 1, 10, Some(30)),
+            // #13 is still in development; #99 is not in the Project
+            session(13, "build", 1, 0, Some(999)),
+            session(99, "build", 1, 0, Some(999)),
+        ];
+        let lines = build_time_lines(&launches, Some(&snap));
+        assert_eq!(
+            lines[1..],
+            [
+                "Ready to Review (2 item(s): a build's first session to its last)",
+                "  median 2h10m · mean 75m · longest 2h10m",
+                "  #12 ver                      2h10m · 3 session(s)",
+                "  #15 filtrar                  20m · 1 session(s)",
+            ]
+        );
+        // a build with a session still going is not finished
+        let mut going = launches.clone();
+        going.push(session(15, "fix", 1, 40, None));
+        assert_eq!(build_time_lines(&going, Some(&snap)).len(), 4);
+        // a closed item counts whatever its column; with no snapshot nothing is known
+        let closed = snap.items.iter_mut().find(|i| i.number == 13).unwrap();
+        closed.open = false;
+        assert!(
+            build_time_lines(&launches, Some(&snap))[1].starts_with("Ready to Review (3 item(s)")
+        );
+        assert!(build_time_lines(&launches, None).is_empty());
+        assert!(build_time_lines(&launches[3..4], Some(&snap)).is_empty());
     }
 
     #[test]

@@ -59,7 +59,7 @@ F1 → **Open project** opens the Project of the selected session's folder.
 | Bugs | Bugs to triage first, then each later stage of a Bug's track |
 | UAT and release | What is in acceptance (Homologação) and what waits for deploy |
 | Milestones | Each open milestone, its Features and the state of each one's documents; tabs for its QA trail, its preflight and its audit |
-| Observability | What the Project's steps cost and what is running: totals, sessions going now, and the cost by step, harness, milestone, executor and item, for the last 30 days and ever |
+| Observability | What the Project's steps cost and what is running: totals, sessions going now, the cost by step, harness, model, milestone, executor and item, the critiques by document, and how long builds took, for the last 30 days and ever |
 | Health | What `agent-mux project doctor` reports |
 
 The left column holds the screens and, under them, the selected screen's rows. The right pane shows the selected row.
@@ -610,7 +610,7 @@ A read that fails never becomes a fact. A document whose listing failed is `unkn
 - In the milestone's audit: the `decisoes_de_modelagem` check of `tech_context.yml`.
 - Starting the QA plan from the `spec-wave:qa` label, and the comments spec-wave leaves when the step is refused: the command prints the reason instead.
 - In the fleet: dispatching to a named developer from the screens (the command does it), the extra tracks of spec-wave's queue label (`devAgent.queues`), and rounds inside a run.
-- On the Observability screen: cost by model, critique attempts per document, and the time from Ready to Review.
+- On the Observability screen: the time an item waited in Ready before its build started (agent-mux reads no history of the board), and the last failures with their reason.
 - Recording a Tech Leader's decision on a finding (`risk-accepted`).
 - Driving the repository's own Actions by trigger label instead of agent-mux's flows.
 - In an edit: an item's type, assignees, area and other labels, creating a milestone, and the `Prioridade` line of a description, which stays as it was written when the priority changes.
