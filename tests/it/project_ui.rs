@@ -873,3 +873,67 @@ fn a_description_is_edited_in_the_editor_and_written_only_after_the_yes() {
         .unwrap_or_default();
     assert!(said.contains("the description was replaced"), "{said}");
 }
+
+/// The line of the drawn screen whose left side says `needle`.
+fn line_of(app: &App, needle: &str) -> u16 {
+    let text = render(app);
+    text.lines()
+        .position(|l| l.chars().take(45).collect::<String>().contains(needle))
+        .unwrap_or_else(|| panic!("{needle:?} is not on the left:\n{text}")) as u16
+}
+
+#[test]
+fn the_mouse_browses_the_screens_and_asks_github_for_nothing() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut f = fixture();
+    f.app.open_project();
+    wait(&mut f.app, "the read", |a| view(a).snap.is_some());
+    wait(&mut f.app, "the checks", |a| view(a).checks.is_some());
+    let before = std::fs::read_to_string(&f.calls).unwrap().lines().count();
+    let now = Instant::now();
+    let mouse = |app: &mut App, kind, row| {
+        app.handle_mouse(
+            MouseEvent {
+                kind,
+                column: 4,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            now,
+        )
+    };
+    let left = MouseEventKind::Down(MouseButton::Left);
+
+    // a screen, through the app's own mouse path
+    let row = line_of(&f.app, "Board");
+    mouse(&mut f.app, left, row);
+    assert_eq!(view(&f.app).screen, Screen::Board);
+    // a row: chosen, then opened by a second click
+    let row = line_of(&f.app, "#2 ");
+    mouse(&mut f.app, left, row);
+    assert!(
+        matches!(
+            view(&f.app).selected_row(),
+            Some(Row::Item { number: 2, .. })
+        ),
+        "{:?}",
+        view(&f.app).selected_row()
+    );
+    assert!(view(&f.app).item.is_none());
+    mouse(&mut f.app, left, row);
+    assert_eq!(view(&f.app).item.as_ref().map(|i| i.number), Some(2));
+    assert!(render(&f.app).contains("ver pedidos"));
+    // the wheel over the rows moves nothing under an open item
+    mouse(&mut f.app, MouseEventKind::ScrollDown, row);
+    assert!(matches!(
+        view(&f.app).selected_row(),
+        Some(Row::Item { number: 2, .. })
+    ));
+    // another row closes the item
+    let row = line_of(&f.app, "#1 ");
+    mouse(&mut f.app, left, row);
+    assert!(view(&f.app).item.is_none());
+
+    let after = std::fs::read_to_string(&f.calls).unwrap().lines().count();
+    assert_eq!(after, before, "browsing with the mouse called gh");
+}

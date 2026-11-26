@@ -2044,3 +2044,32 @@ page's activity and anything else that prints those lines gain them.
   review. With no snapshot the section is absent.
 - **Not built:** the time an item waited in Ready before its build
   started, and the last failures with their reason.
+
+## 41. After the phases: the mouse on the screens, as built
+
+The Project screens took only keys. They now take the mouse as the
+Library and the Swarm screens do: the last frame says where each part
+was drawn (`app::project::Drawn`, in `ProjectView.drawn`, written by
+`ui::project` as it draws), and `ProjectView::handle_mouse` answers an
+`Outcome` that `App::project_mouse` acts on exactly as a key's
+(`App::project_outcome`). Nothing new is written or read: every click
+ends in a move the keyboard already made.
+
+- **A click** on the list of screens chooses a screen (and closes an
+  open item). On a row it chooses the row; on the row that is already
+  chosen it is `Enter`, and on a heading it folds at once. With an item
+  open, a click on a row at the left closes the item and chooses the
+  row. On the line of tabs it opens the tab under it (`tab_at`, the
+  inverse of `tabs_line`; the Thread and Trace tabs are read as they
+  are from the keyboard). On the item screen's Documents, Children,
+  Pull requests and Trace it chooses a row, and a second click is
+  `Enter`.
+- **The wheel** moves what it is over: the screens, without going round
+  at the ends; the rows, one at a time; the pane's text, three lines at
+  a time and no further than its last line; the item screen's list.
+  Under an open item the lists at the left stay still.
+- **A dialog takes no click.** While a form, a picker or a confirmation
+  is open the mouse does nothing, so a write is still confirmed with a
+  key.
+- **Not built:** clicks inside a dialog, and clickable keys in the
+  footer.

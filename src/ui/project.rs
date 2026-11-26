@@ -4,7 +4,7 @@
 
 use super::flow::{dim, head, hints, key_style};
 use crate::app::project::{
-    Focus, ITEM_TABS, Modal, ProjectView, Row, Screen, TAB_AUDIT, TAB_PREFLIGHT, TAB_TRACE,
+    Drawn, Focus, ITEM_TABS, Modal, ProjectView, Row, Screen, TAB_AUDIT, TAB_PREFLIGHT, TAB_TRACE,
     TAB_TRAIL, milestone_features, needs_you,
 };
 use crate::project::contract::*;
@@ -53,6 +53,7 @@ fn block(title: String, focused: bool) -> Block<'static> {
 
 pub fn draw(f: &mut Frame, area: Rect, v: &ProjectView) {
     f.render_widget(Clear, area);
+    v.drawn.set(Drawn::default());
     let [body, input, foot] = Layout::vertical([
         Constraint::Min(0),
         Constraint::Length(if v.filtering { 1 } else { 0 }),
@@ -128,6 +129,11 @@ fn draw_nav(f: &mut Frame, area: Rect, v: &ProjectView) {
     // keep the selected screen in sight when the list is cut
     let at = Screen::ALL.iter().position(|s| *s == v.screen).unwrap_or(0);
     let scroll = (at + 1).saturating_sub(usize::from(inner.height)) as u16;
+    v.drawn.set(Drawn {
+        nav: inner,
+        nav_start: usize::from(scroll),
+        ..v.drawn.get()
+    });
     f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
 }
 
@@ -185,6 +191,7 @@ fn draw_list(f: &mut Frame, area: Rect, v: &ProjectView) {
     if !v.filter.is_empty() && !v.filtering {
         lines.push(Line::styled(format!(" filter: {}", v.filter), dim()));
     }
+    let lead = lines.len();
     if v.rows.is_empty() {
         lines.push(Line::styled(
             match v.screen {
@@ -276,6 +283,12 @@ fn draw_list(f: &mut Frame, area: Rect, v: &ProjectView) {
     }
     let visible = usize::from(inner.height);
     let start = super::sidebar_window(cursor_line, lines.len(), visible);
+    v.drawn.set(Drawn {
+        list: inner,
+        list_start: start,
+        list_lead: lead,
+        ..v.drawn.get()
+    });
     f.render_widget(
         Paragraph::new(lines.into_iter().skip(start).collect::<Vec<_>>()),
         inner,
@@ -395,9 +408,11 @@ struct Pane<'a> {
     wrap: bool,
     /// The pane has the keyboard (the item screen).
     focused: bool,
+    /// The line that is the first row of the tab's list, when it is one.
+    rows_at: Option<u16>,
 }
 
-fn render_pane(f: &mut Frame, area: Rect, pane: Pane) {
+fn render_pane(f: &mut Frame, area: Rect, v: &ProjectView, pane: Pane) {
     let b = block(pane.title, pane.focused);
     let inner = b.inner(area);
     f.render_widget(b, area);
@@ -409,6 +424,13 @@ fn render_pane(f: &mut Frame, area: Rect, pane: Pane) {
     .areas(inner);
     f.render_widget(Paragraph::new(tabs_line(pane.tabs, pane.tab)), tab_area);
     let max = (pane.lines.len() as u16).saturating_sub(1);
+    v.drawn.set(Drawn {
+        tabs: tab_area,
+        content,
+        max_scroll: max,
+        rows_at: pane.rows_at,
+        ..v.drawn.get()
+    });
     let mut p = Paragraph::new(pane.lines).scroll((pane.scroll.min(max), 0));
     if pane.wrap {
         p = p.wrap(Wrap { trim: false });
@@ -715,6 +737,7 @@ fn draw_pane(f: &mut Frame, area: Rect, v: &ProjectView) {
     render_pane(
         f,
         area,
+        v,
         Pane {
             title,
             tabs,
@@ -723,6 +746,7 @@ fn draw_pane(f: &mut Frame, area: Rect, v: &ProjectView) {
             scroll: v.scroll,
             wrap: wrap_text,
             focused: false,
+            rows_at: None,
         },
     );
 }
@@ -754,6 +778,7 @@ fn draw_item_screen(f: &mut Frame, area: Rect, v: &ProjectView) {
         render_pane(
             f,
             area,
+            v,
             Pane {
                 title: format!(" #{} ", screen.number),
                 tabs: &ITEM_TABS,
@@ -765,6 +790,7 @@ fn draw_item_screen(f: &mut Frame, area: Rect, v: &ProjectView) {
                 scroll: 0,
                 wrap: false,
                 focused: true,
+                rows_at: None,
             },
         );
         return;
@@ -901,6 +927,7 @@ fn draw_item_screen(f: &mut Frame, area: Rect, v: &ProjectView) {
     render_pane(
         f,
         area,
+        v,
         Pane {
             title,
             tabs: &ITEM_TABS,
@@ -909,6 +936,12 @@ fn draw_item_screen(f: &mut Frame, area: Rect, v: &ProjectView) {
             scroll,
             wrap: wrap_text,
             focused: true,
+            rows_at: match screen.tab {
+                1..=3 => Some(0),
+                // the totals and a blank line come first
+                TAB_TRACE => Some(2),
+                _ => None,
+            },
         },
     );
 }
@@ -1264,6 +1297,229 @@ mod tests {
         v.snap = Some(snapshot::build(&fixture::raw(), &fixture::cfg(), 1));
         v.rebuild();
         v
+    }
+
+    use crate::app::project::{Outcome, tab_at};
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    const W: u16 = 120;
+    const H: u16 = 34;
+
+    /// Where a text is on the drawn screen, left of column `max_x`.
+    fn find(v: &ProjectView, needle: &str, min_x: u16, max_x: u16) -> (u16, u16) {
+        let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
+        term.draw(|f| draw(f, f.area(), v)).unwrap();
+        let buf = term.backend().buffer().clone();
+        for y in 0..H {
+            for x in min_x..max_x.min(W) {
+                let rest: String = (x..W).map(|c| buf[(c, y)].symbol()).collect();
+                if rest.starts_with(needle) {
+                    return (x, y);
+                }
+            }
+        }
+        panic!("{needle:?} is not drawn:\n{}", screen_text(v, W, H));
+    }
+
+    fn mouse(v: &mut ProjectView, kind: MouseEventKind, at: (u16, u16)) -> Outcome {
+        v.handle_mouse(&MouseEvent {
+            kind,
+            column: at.0,
+            row: at.1,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    fn click(v: &mut ProjectView, at: (u16, u16)) -> Outcome {
+        mouse(v, MouseEventKind::Down(MouseButton::Left), at)
+    }
+
+    /// The column where the right side starts.
+    fn split(v: &ProjectView) -> u16 {
+        screen_text(v, W, H);
+        v.drawn.get().list.right() + 1
+    }
+
+    fn row_of(v: &ProjectView, number: u64) -> usize {
+        v.rows
+            .iter()
+            .position(|r| matches!(r, Row::Item { number: n, .. } if *n == number))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_click_chooses_a_screen_a_row_and_a_tab() {
+        let mut v = view();
+        let mid = split(&v);
+        // a screen, by its name in the list of screens
+        let at = find(&v, "Board", 0, mid);
+        assert_eq!(click(&mut v, at), Outcome::None);
+        assert_eq!((v.screen, v.focus), (Screen::Board, Focus::Nav));
+
+        // a row: the first click chooses it, the second opens it
+        let numbers: Vec<u64> = v
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Item { number, .. } => Some(*number),
+                _ => None,
+            })
+            .collect();
+        let number = *numbers.last().unwrap();
+        assert_ne!(v.cursor(), row_of(&v, number));
+        let at = find(&v, &format!("#{number} "), 0, mid);
+        click(&mut v, at);
+        assert_eq!(v.cursor(), row_of(&v, number));
+        assert_eq!(v.focus, Focus::List);
+        assert!(v.item.is_none());
+        click(&mut v, at);
+        assert_eq!(v.item.as_ref().map(|i| i.number), Some(number));
+
+        // a tab of the item screen; Thread is read when it opens
+        let at = find(&v, "3 Children", mid, W);
+        click(&mut v, at);
+        assert_eq!(v.item.as_ref().unwrap().tab, 2);
+        let at = find(&v, "5 Thread", mid, W);
+        assert_eq!(click(&mut v, at), Outcome::LoadThread(number));
+
+        // a row of the list under an open item closes the item
+        let other = numbers[0];
+        let at = find(&v, &format!("#{other} "), 0, mid);
+        click(&mut v, at);
+        assert!(v.item.is_none());
+        assert_eq!(v.cursor(), row_of(&v, other));
+
+        // a tab of a screen
+        let tabs = v.screen.tabs();
+        if tabs.len() > 1 {
+            let at = find(&v, &format!("2 {}", tabs[1]), mid, W);
+            click(&mut v, at);
+            assert_eq!(v.tab, 1);
+        }
+
+        // a heading folds on one click
+        let (key, text) = v
+            .rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Heading { key, text, .. } => Some((key.clone(), text.clone())),
+                _ => None,
+            })
+            .unwrap();
+        let folded = v.collapsed.contains(&key);
+        // a heading is drawn as its text and its count
+        let word = text.split_whitespace().last().unwrap();
+        let at = find(&v, &format!("{word} ("), 0, mid);
+        click(&mut v, at);
+        assert_ne!(v.collapsed.contains(&key), folded);
+    }
+
+    #[test]
+    fn a_click_in_an_items_list_chooses_then_opens() {
+        let mut v = view();
+        let snap = v.snap.clone().unwrap();
+        let parent = snap
+            .items
+            .iter()
+            .find(|i| snap.children_of(i.number).len() > 1)
+            .unwrap()
+            .number;
+        let second = snap.children_of(parent)[1].number;
+        v.item = Some(crate::app::project::ItemScreen {
+            number: parent,
+            tab: 2,
+            cursor: 0,
+            scroll: 0,
+            back: Vec::new(),
+        });
+        let mid = split(&v);
+        let at = find(&v, &format!("#{second} "), mid, W);
+        click(&mut v, at);
+        assert_eq!(v.item.as_ref().unwrap().cursor, 1);
+        assert_eq!(v.item.as_ref().unwrap().number, parent);
+        click(&mut v, at);
+        let open = v.item.as_ref().unwrap();
+        assert_eq!((open.number, open.back.clone()), (second, vec![parent]));
+
+        // the wheel over a list moves its cursor and stops at its ends
+        v.item.as_mut().unwrap().number = parent;
+        v.item.as_mut().unwrap().tab = 2;
+        v.item.as_mut().unwrap().cursor = 0;
+        screen_text(&v, W, H);
+        let last = snap.children_of(parent).len() - 1;
+        for _ in 0..last + 3 {
+            mouse(&mut v, MouseEventKind::ScrollDown, at);
+        }
+        assert_eq!(v.item.as_ref().unwrap().cursor, last);
+        // and over the lists on the left it moves nothing under an item
+        let before = v.cursor();
+        mouse(&mut v, MouseEventKind::ScrollDown, (2, H - 6));
+        assert_eq!(v.cursor(), before);
+    }
+
+    #[test]
+    fn the_wheel_moves_what_it_is_over_and_a_dialog_takes_no_click() {
+        let mut v = view();
+        v.screen = Screen::Board;
+        v.rebuild();
+        let mid = split(&v);
+        let d = v.drawn.get();
+        // the rows
+        let on_list = (d.list.x + 1, d.list.y + 1);
+        mouse(&mut v, MouseEventKind::ScrollDown, on_list);
+        assert_eq!(v.cursor(), 1);
+        mouse(&mut v, MouseEventKind::ScrollUp, on_list);
+        mouse(&mut v, MouseEventKind::ScrollUp, on_list);
+        assert_eq!(v.cursor(), 0);
+        // the right side scrolls no further than its last line
+        let on_pane = (mid + 4, d.content.y + 1);
+        for _ in 0..200 {
+            mouse(&mut v, MouseEventKind::ScrollDown, on_pane);
+        }
+        assert_eq!(v.scroll, d.max_scroll);
+        mouse(&mut v, MouseEventKind::ScrollUp, on_pane);
+        assert_eq!(v.scroll, d.max_scroll.saturating_sub(3));
+        // the list of screens, which stops at its ends
+        let on_nav = (d.nav.x + 1, d.nav.y);
+        mouse(&mut v, MouseEventKind::ScrollUp, on_nav);
+        assert_eq!(v.screen, Screen::ALL[0]);
+        mouse(&mut v, MouseEventKind::ScrollUp, on_nav);
+        assert_eq!(v.screen, Screen::ALL[0]);
+        for _ in 0..Screen::ALL.len() + 2 {
+            mouse(&mut v, MouseEventKind::ScrollDown, on_nav);
+        }
+        assert_eq!(v.screen, *Screen::ALL.last().unwrap());
+
+        // a dialog is answered on the keyboard
+        v.modal = Some(Modal::Confirm {
+            lines: vec!["write?".into()],
+            op: crate::app::project::Op::Advance(Vec::new()),
+        });
+        screen_text(&v, W, H);
+        assert_eq!(click(&mut v, on_nav), Outcome::None);
+        assert_eq!(v.screen, *Screen::ALL.last().unwrap());
+        assert!(v.modal.is_some());
+    }
+
+    #[test]
+    fn a_column_of_the_line_of_tabs_is_the_tab_drawn_there() {
+        for tabs in [
+            &ITEM_TABS[..],
+            Screen::Milestones.tabs(),
+            Screen::Home.tabs(),
+        ] {
+            let mut x = 0u16;
+            for (i, span) in tabs_line(tabs, 0).spans.iter().enumerate() {
+                let width = span.content.chars().count() as u16;
+                // spans: a space, then a label and a space for each tab
+                let want = (i % 2 == 1).then_some(i / 2);
+                for col in x..x + width {
+                    assert_eq!(tab_at(tabs, col), want, "{tabs:?} column {col}");
+                }
+                x += width;
+            }
+            assert_eq!(tab_at(tabs, x + 3), None);
+        }
     }
 
     #[test]
