@@ -2010,3 +2010,37 @@ spec-wave reads stays true.
   `## Metadados`, which is left as written when the priority changes (as
   `triage accept --severity` leaves it); the description in the form
   itself.
+
+## 40. After the phases: the rest of the Observability screen, as built
+
+The three lines of §9.3 that §31 left out, all read-only and all in
+`tracing::project_report::observability_lines`, so the screen, the web
+page's activity and anything else that prints those lines gain them.
+
+- **By model.** A model is a generation's, not a session's, so a
+  `StepLaunch` now carries `models` (`ModelUse`: the tokens and the cost
+  of each model's generations in that session, read with one grouped
+  query per launch). The section lists each model with the sessions that
+  called it, its tokens and its cost, most expensive first. A session
+  that called two models is in both rows, each with that model's share
+  alone; a session with no generation is in none. No running time: time
+  is a session's and cannot be split by model.
+- **Critiques by document.** A critique session did not say which
+  document it audited. It does now: its step is `critique:<kind>`
+  (`spec`, `plan`, `stories`, `bug`, `qa`), as an agent's name and an
+  insight's scope already ride in theirs, and "By step" still counts
+  them as one `critique` row. The section gives, per kind, the critiques
+  run, the documents audited, the highest attempt, the tokens and the
+  cost, then the documents audited more than once (`#3 spec ×3`). The
+  attempt is the session's own number, which `critique::resolve_attempt`
+  counts from the issue's comments. Sessions from before this are under
+  `(document not recorded)`.
+- **Ready to Review.** agent-mux reads no history of the board, so the
+  time is what the sessions say: for each item the snapshot shows in
+  code review or later, or closed, from the first session of its `build`
+  or `fix` step to the last. The section gives the median, the mean and
+  the longest, and the five longest items. A build with a session still
+  going is left out, and so is a `fix-pr` round, which comes after the
+  review. With no snapshot the section is absent.
+- **Not built:** the time an item waited in Ready before its build
+  started, and the last failures with their reason.

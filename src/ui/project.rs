@@ -1507,6 +1507,7 @@ mod tests {
             tokens: Some(500),
             cost_usd: None,
             unpriced: false,
+            models: Vec::new(),
         };
         v.trace = Some(trace(report(vec![
             launch("L-1", 0, "run-a", "build"),

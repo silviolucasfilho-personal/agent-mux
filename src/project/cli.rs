@@ -3110,7 +3110,9 @@ async fn cmd_run(a: &Args) -> anyhow::Result<()> {
                     model,
                     super::ProjectLaunch {
                         attempt: job.attempt,
-                        ..launch("critique")
+                        // the document it audits rides in the step, as an
+                        // agent's name and an insight's scope do
+                        ..launch(&format!("critique:{}", job.kind.as_str()))
                     },
                 )
                 .await
